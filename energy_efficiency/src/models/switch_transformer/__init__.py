@@ -1,0 +1,2 @@
+from src.models.switch_transformer.switch_base_8 import switch_base_8_init
+from src.models.switch_transformer.switch_base_n import switch_base_n_init
