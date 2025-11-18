@@ -1,16 +1,42 @@
+"""This file contains the configurations for the project.
+"""
 from typing import Any, Type, TypeVar
 import argparse
 import enum
 
+# Used for templated typing.
 T = TypeVar("T")
 
 def _missing_arg(name : str) -> None:
+    """Raise an exception for a missing argument.
+    """
     raise Exception(f"missing argument {name}")
 
 def _wrong_arg_type(name : str, expected : Type[Any], actual : Type[Any]) -> None:
+    """Raise an exception for an argument that has the wrong type.
+    """
     raise Exception(f"argument {name} expected to have type {expected} but got {actual}")
 
 def _get_arg(args : argparse.Namespace, name : str, arg_type : Type[T]) -> T:
+    """Extract an argument from a namespace.
+
+    This function verifies that the requested argument is present and has the correct type. If the checks pass, the argument's value is returned.
+
+    Parameters
+    ----------
+    args
+        Namespace containing the programs arguments.
+    name
+        Name of the argument to extract from the namespace.
+    arg_type
+        Expected type of the argument.
+
+    Returns
+    -------
+    T
+        The value of requested argument.
+
+    """
     if not hasattr(args, name):
         _missing_arg(name)
     elif not isinstance(getattr(args, name), arg_type):
@@ -19,6 +45,8 @@ def _get_arg(args : argparse.Namespace, name : str, arg_type : Type[T]) -> T:
 
 @enum.unique
 class ConfigArgs(enum.Enum):
+    """List of arguments that can be provided to the process.
+    """
     MODEL = "model"
     TRAINER = "trainer"
     DATASET = "dataset"
