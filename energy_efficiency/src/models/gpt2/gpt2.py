@@ -69,9 +69,9 @@ def pre_init_gpt2(conf: config.Config, dataset: data.Dataset) -> Tuple[transform
     """
     tokenizer = init_gpt2_tokenizer()
     dataset = process_dataset(conf, tokenizer, dataset)
-    data_collator = transformers.DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False) # mlm_probability=0.15
+    data_collator = transformers.DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    model_config = transformers.GPT2Config()# (n_layer=3, loss_type="ForCausalLMLoss") # default is 12 layers
+    model_config = transformers.GPT2Config() # default is 12 layers
     # https://huggingface.co/docs/transformers/en/model_doc/gpt2#transformers.GPT2Config
     model = transformers.GPT2LMHeadModel(config=model_config)
     # https://huggingface.co/docs/transformers/en/model_doc/gpt2#transformers.GPT2LMHeadModel
@@ -96,7 +96,6 @@ def simple_trainer(conf : config.Config, model : transformers.GPT2LMHeadModel, d
         data_collator (transformers.DataCollatorForLanguageModeling): The data collator to use.
     Returns:
         Tuple[trainer.Trainer, Optional[Dict]]: The simple trainer and a dictionary with additional options.
-        The dictionary can contain options like "output_router_logits" to control the output of the router logits.
     """
     loader = data.DataLoader(dataset, batch_size=conf.batch_size, collate_fn=data_collator)
     model = model.cuda()
@@ -122,7 +121,6 @@ def gpt2_init(conf: config.Config, dataset: data.Dataset) -> Tuple[trainer.Train
         dataset (data.Dataset): The dataset to use for training.
     Returns:
         Tuple[trainer.Trainer, Optional[Dict]]: The initialized trainer and a dictionary with additional options.
-        The dictionary can contain options like "output_router_logits" to control the output of the router logits.
     """
     model, dataset, tokenizer, data_collator = pre_init_gpt2(conf, dataset)
     if conf.trainer == "simple": 

@@ -27,35 +27,23 @@ COMP597-starter-code
 ├── env.sh                                  # script to setup the conda environment variables
 ├── .gitignore                              # gitignore file to exclude unnecessary files
 ├── ...
-├── energy_effiency
-│   ├── codecarbonlogs                      # folder containing all codecarbon logs from running codecarbon scripts
-│   ├── codecarbon_scripts
-│   │   ├── codecarbon_datacollect.sh       # script that runs and collects codecarbon information for switch-transformers (simple, custom, fmoe, 
-│   │   │                                     deepspeed) + qwen (simple, deepspeed, fmoe) with different parameters
-│   │   ├── tmp_fmoe_datacollection.sh      # script that runs qwen/switch with fmoe and creates graphs 
-│   │   ├── codecarbon_cleanup.sh           # script that cleans up the log files and merges them after collecting codecarbon data
-│   │   ├── codecarbon_pipeline.sh          # script that pipelines the process of data collection, cleanup and plotting
-│   │   ├── plot_losses.sh                  # script that runs the loss plotting
-│   │   ├── plot_losses.py                  # python code for loss plotting
-│   │   └── plots.sh                        # script that creates graphs for the codecarbon collected data (LAURA)
+├── energy_efficiency
 │   ├── src
 │   │   ├── config
 │   │   │   └── config.py                   # configurations file with user given arguments
 │   │   ├── models
-│   │   │   ├── qwen
+│   │   │   ├── gpt2
 │   │   │   │   ├── __init__.py
-│   │   │   │   ├── qwen_small.py           # qwen3moe implementation with deepspeed, fmoe, simple
-│   │   │   │   └── structures.txt          # qwen-moe and switch transformers configuration structures + collected data for memory capacity qwen3moe
+│   │   │   │   └── gpt2.py                 # gpt2 model simple trainer example
 │   │   ├── trainer
 │   │   │   ├── stats
 │   │   │   │   ├── codecarbon.py           # trainer stats to collect codecarbon information with losses
 │   │   │   │   └── ...
-│   │   │   ├── base.py                     # abstract methods + added loss tracking function for more data (log_loss())
-│   │   │   ├── distributed_base.py
-│   │   │   ├── deepspeed.py
+│   │   │   ├── base.py                     # abstract methods 
+│   │   │   ├── simple.py                   # simple trainer 
 │   │   │   └── ...
 │   ├── launch.py
-│   ├── start-qwen.sh                       # script to easily start qwen using deepspeed
+│   ├── start-gpt2.sh                       # script to easily start gpt2 
 │   └── ...
 └── ...
 ```
