@@ -15,7 +15,7 @@ def process_conf(conf : config.Config) -> Tuple[trainer.Trainer, Optional[Dict[s
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(config.ConfigArgs.MODEL.to_arg(), type=str, help="Which model to train.", choices=["switch-base-8", "switch-base-n", "qwen-moe", "unet3d", "unet3d_mlcommons", "gpt2"])
+    parser.add_argument(config.ConfigArgs.MODEL.to_arg(), type=str, help="Which model to train.", choices=["gpt2"])
     parser.add_argument(config.ConfigArgs.TRAINER.to_arg(), type=str, help="How to train the model", default="simple", choices=["simple"])
     parser.add_argument(config.ConfigArgs.DATASET.to_arg(), type=str, help="Which dataset to use.", default="allenai/c4",  choices=["allenai/c4"])
     # TODO Remove default, it makes no sense.
@@ -30,8 +30,8 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(config.ConfigArgs.RUN_NUM.to_arg(), type=int, help="The run number used for codecarbon file tracking.", default=0)
     parser.add_argument(config.ConfigArgs.PROJECT_NAME.to_arg(), type=str, help="The name of the project used for codecarbon file tracking.", default="energy-efficiency")
     
-    # The default is set to 1e-6 which is a good default rate for training Qwen models. 1e-7 is a good default rate for Switch-Transformers. Make sure to adjust it for different models
-    parser.add_argument(config.ConfigArgs.LEARNING_RATE.to_arg(), type=float, help="The learning rate for training. It is used by the optimizer for both Switch Transformers and Qwen models.", default=1e-6)
+    # TODO: The default is set to 1e-6 which is a good default rate for training Qwen models. 1e-7 is a good default rate for Switch-Transformers. Make sure to adjust it for different models
+    parser.add_argument(config.ConfigArgs.LEARNING_RATE.to_arg(), type=float, help="The learning rate for training. It is used by the optimizer for all models.", default=1e-6)
     
     args, _ = parser.parse_known_args()
     return args

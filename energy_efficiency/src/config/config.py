@@ -96,7 +96,6 @@ class Config:
         """The run number used for codecarbon file tracking."""
         self.project_name : str = _get_arg(args, ConfigArgs.PROJECT_NAME.value, str)
         """The name of the project used for codecarbon file tracking."""
-
         self.learning_rate : float = _get_arg(args, ConfigArgs.LEARNING_RATE.value, float)
-        """The learning rate for training. It is used by the optimizer for both Switch Transformers and Qwen models."""
+        """The learning rate for training. It is used by the optimizer for all models and varies depending on the model and training setup."""
 

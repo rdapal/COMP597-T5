@@ -16,39 +16,31 @@ TODO: instructions for the project. eg:
 
 ---
 
-TODO: add a section for repository structure. with a tree and description of important folders and files.
-
-Structure: #TODO
+### Repository Structure: 
 ```
 COMP597-starter-code
 .
-├── README.md                               # instructions and description of the project
-├── requirements.txt                        # list of required packages to install
-├── env.sh                                  # script to setup the conda environment variables
-├── .gitignore                              # gitignore file to exclude unnecessary files
-├── ...
 ├── energy_efficiency
 │   ├── src
-│   │   ├── config
-│   │   │   └── config.py                   # configurations file with user given arguments
+│   │   ├── config                          # Configuration related files                     
 │   │   ├── models
 │   │   │   ├── gpt2
-│   │   │   │   ├── __init__.py
-│   │   │   │   └── gpt2.py                 # gpt2 model simple trainer example
-│   │   ├── trainer
-│   │   │   ├── stats
-│   │   │   │   ├── codecarbon.py           # trainer stats to collect codecarbon information with losses
-│   │   │   │   └── ...
-│   │   │   ├── base.py                     # abstract methods 
-│   │   │   ├── simple.py                   # simple trainer 
-│   │   │   └── ...
-│   ├── launch.py
-│   ├── start-gpt2.sh                       # script to easily start gpt2 
-│   └── ...
-└── ...
+│   │   │   └── ...                 
+│   │   ├── trainer                         
+│   │   │   ├── stats                       # Stats collection for trainers
+│   │   │   │  ├── base.py 
+│   │   │   │  └── ...
+│   │   │   ├── base.py                     # Trainer base class
+│   │   └── ...   
+│   ├── launch.py                           # Main script to launch training experiments                           
+│   ├── requirements.txt                        
+│   └── start-gpt2.sh
+├── .gitignore
+├── env_setup.sh                            # Script to setup the conda environment                               
+└── README.md
 ```
 
-#### environment setup
+#### Environment setup
 
 We will use a Conda envrionment to install the required dependencies. The steps below will walk you through the steps. A setup script `env_setup.sh` is also provided and will execute all the steps below given as input the path `SOME_PATH` as described in step one below.
 
@@ -60,7 +52,7 @@ We will use a Conda envrionment to install the required dependencies. The steps 
 3. **Creating the project environment** <br> First, let's make sure to create the directory to store the environment using `mkdir -p ${BASE_STORAGE_PATH}/conda/envs`. You can now simply run `conda create --prefix ${BASE_STORAGE_PATH}/conda/envs/COMP597-project python=3.14` to create the environment. 
 4. **Activating the environment** <br> You can use your environment by activating it with `conda activate ${BASE_STORAGE_PATH}/conda/envs/COMP597-project`. 
 5. **Installing dependencies** <br> The dependencies are provided as a requirements file. You can install them using `pip install -r energy_efficiency/requirements.txt`.
-6. **Using the environment** <br> For any future use of the environment, you can create a script, let's name it `local_env.sh`, which will contain the configuration to set up the environment. You can then execute the script with `. local_env.sh` to set up activate your environment. The script would look like this (where you need to replace `SOME_PATH`.:
+6. **Using the environment** <br> For any future use of the environment, you can create a script, let's name it `local_env.sh`, which will contain the configuration to set up the environment. You can then execute the script with `. local_env.sh` to set up activate your environment. The script would look like this (where you need to replace `SOME_PATH`):
     ```
     #!/bin/bash
     
@@ -78,5 +70,33 @@ TODO: add section for resources
 - [laura documentation](https://docs.google.com/document/d/1Ihfniv1CaWz79tO4IcXx3JG7pAZDIGWigAMDKiVTNDc/edit)
 
 TODO: add section for how to run experiments, how to edit files to add a new model etc.
+
+
+### GPT2 example
+#### How to setup a new model (GPT2)
+Files to edit/add:
+- Add a new model under the models directory, `energy_efficiency/src/models/gpt2/gpt2.py` : contains the GPT2 model definition, optimizer initialization, and trainer setup.
+- Create a bash script to run the experiments (optional), `energy_efficiency/start-gpt2.sh` : script to launch experiments with GPT2 model.
+- Edit the main launch file to add the new model, `energy_efficiency/launch.py` : add the model choice in the argument parser.
+- Edit the configuration file to add any model-specific configurations, `energy_efficiency/src/config/config.py`.
+- Edit the requirements file if new dependencies are needed, `energy_efficiency/requirements.txt`.
+- Add any additional files as needed for data processing, evaluation, etc.
+- Add trainer objects and/or trainer stats if needed under `energy_efficiency/src/trainer/`.
+
+Setting up a model - GPT2 example:
+1. Find and setup a tokenizer from Hugging Face transformers. Make adjustements as needed to make it compatible with your dataset.
+2. Find and setup an optimizer. Make sure to set the learning rate from the configuration object.
+3. Setup data processing using the tokenizer and dataset.
+4. Setup the model using data collator, a config from the model and a model (do not take the pretrained one).
+5. implement the trainer setup function. You can start with a simple trainer as shown in the example. You can implement more complex trainers as needed.
+6. Initialize the model and add it to the [init file](energy_efficiency/src/models/__init__.py) in the model factory. Make sure to add the model choice in the launch file argument parser and add any needed arguments to the configuration file.
+
+#### How to run experiments with GPT2
+Running experiments using launch.py - TODO: see laura documentation !!!
+
+Example commands to run experiments with GPT2 can be found in the `energy_efficiency/start-gpt2.sh` script.
+
+To run the model with codecarbon tracking, make necessary modifications to the codecarbon trainer stats and run the experiments as shown in the script.
+Add any other trainer stats objects as needed and run experiments accordingly.
 
 ---
