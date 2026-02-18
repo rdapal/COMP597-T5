@@ -1,0 +1,19 @@
+{
+  "run_id": "20260218_174648",
+  "timestamp": "2026-02-18T17:47:20.291424",
+  "device": "cuda:0",
+  "num_steps": 125,
+  "nvml_available": true,
+  "psutil_available": true,
+  "summary": {
+    "avg_step_time_ms": 251.3700552419355,
+    "avg_forward_time_ms": 77.3254930483871,
+    "avg_backward_time_ms": 135.18265718548386,
+    "avg_optimizer_time_ms": 37.89017266935484,
+    "avg_gpu_memory_mb": 3438.0109469506046,
+    "peak_gpu_memory_mb": 10616.72705078125,
+    "avg_gpu_utilization": 97.68548387096774,
+    "avg_cpu_utilization": 0.5120967741935484,
+    "warmup_step_time_ms": 440.32808
+  }
+}
