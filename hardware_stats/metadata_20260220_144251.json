@@ -1,0 +1,16 @@
+{
+  "run_id": "20260220_144251",
+  "gpu_name": "NVIDIA RTX 5000 Ada Generation",
+  "gpu_power_limit_w": 250.0,
+  "device": "cuda:0",
+  "num_steps": 125,
+  "num_steady_state_steps": 124,
+  "nvml_available": true,
+  "psutil_available": true,
+  "total_energy_j": 6594.377322843983,
+  "avg_step_energy_mj": 53083.5697645091,
+  "avg_step_time_ms": 251.95956545967744,
+  "avg_gpu_power_w": 212.12185349462365,
+  "timestamp_start": "2026-02-20T14:42:52.154495",
+  "timestamp_end": "2026-02-20T14:43:23.661991"
+}

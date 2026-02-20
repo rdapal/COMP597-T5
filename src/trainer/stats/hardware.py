@@ -1,15 +1,15 @@
 """
 Hardware Monitoring TrainerStats
 
-Add hardware metrics:
-- GPU utilization (%)
-- GPU memory: allocated, reserved, peak (MB)
-- CPU utilization (%)
-- Per-phase time series data
-
-Outputs CSV files for plotting and analysis
-
-Based on the interface defined in src/trainer/stats/base.py
+Collects per-phase:
+- Timing (ms)
+- GPU power draw (W) via NVML
+- Energy consumed (J) = avg_power × duration
+- GPU memory (MB) via PyTorch
+- GPU utilization (%) via NVML
+- GPU temperature (°C) via NVML
+- CPU utilization (%) via psutil
+Reference: Based on the interface defined in src/trainer/stats/base.py
 Following patterns from src/trainer/stats/simple.py
 """
 
@@ -19,7 +19,7 @@ import csv
 import json
 import time
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from typing import List, Optional
 
 import torch
@@ -29,49 +29,44 @@ import src.trainer.stats.base as base
 
 logger = logging.getLogger(__name__)
 
-# Module-level name for auto-discovery
 trainer_stats_name = "hardware"
 
-# Optional GPU monitoring via pynvml
 try:
     import pynvml
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
-    logger.debug("pynvml not available - GPU utilization will be estimated")
+    logger.debug("pynvml not available — GPU power/utilization will not be tracked")
 
-# Optional CPU monitoring via psutil
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    logger.debug("psutil not available - CPU utilization will not be tracked")
+    logger.debug("psutil not available — CPU utilization will not be tracked")
 
 
 def construct_trainer_stats(conf: config.Config, **kwargs) -> base.TrainerStats:
     """
-    Factory function for the auto-discovery system
-    
-    Called by the starter code when --trainer_stats hardware is specified
+    Factory function for the auto-discovery system.
+    Called when --trainer_stats hardware is specified.
     """
     if "device" in kwargs:
         device = kwargs["device"]
     else:
         logger.warning("No device provided to hardware trainer stats. Using CUDA device 0")
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
+
     num_train_steps = kwargs.get("num_train_steps", 100)
-    
-    # Get config if available
-    output_dir = "./hardware_stats"
+
+    output_dir = "/home/2021/rdapal/COMP597/COMP597-starter-code/hardware_stats"
     run_id = None
-    
+
     hw_conf = getattr(conf.trainer_stats_configs, 'hardware', None)
     if hw_conf:
         output_dir = getattr(hw_conf, 'output_dir', output_dir)
         run_id = getattr(hw_conf, 'run_id', run_id)
-    
+
     return HardwareTrainerStats(
         device=device,
         output_dir=output_dir,
@@ -82,40 +77,59 @@ def construct_trainer_stats(conf: config.Config, **kwargs) -> base.TrainerStats:
 
 @dataclass
 class StepRecord:
-    """Data recorded for each training step."""
+    """All data recorded for a single training step."""
     step_num: int
-    
-    # Timing (nanoseconds, converted to ms for output)
-    step_time_ns: int
-    forward_time_ns: int
-    backward_time_ns: int
-    optimizer_time_ns: int
-    
-    # GPU Memory (bytes, converted to MB for output)
-    gpu_memory_allocated: int
-    gpu_memory_reserved: int
-    gpu_memory_peak: int
-    
-    # Utilization (percentage)
-    gpu_utilization: float
-    cpu_utilization: float
-    
-    # Timestamp
+
+    # ---- Timing (milliseconds) ----
+    step_time_ms: float
+    forward_time_ms: float
+    backward_time_ms: float
+    optimizer_time_ms: float
+
+    # ---- GPU Memory via PyTorch (MB) ----
+    gpu_memory_allocated_mb: float
+    gpu_memory_reserved_mb: float
+    gpu_memory_peak_mb: float
+
+    # ---- GPU Power via NVML (Watts) ----
+    # Sampled at start and end of each phase
+    gpu_power_forward_start_w: float
+    gpu_power_forward_end_w: float
+    gpu_power_backward_start_w: float
+    gpu_power_backward_end_w: float
+    gpu_power_optimizer_start_w: float
+    gpu_power_optimizer_end_w: float
+
+    # ---- Per-Phase Energy (Joules) ----
+    # Energy = avg_power(W) × duration(s)
+    energy_forward_j: float
+    energy_backward_j: float
+    energy_optimizer_j: float
+    energy_step_j: float          # sum of phase energies
+
+    # ---- GPU Temperature (*C) via NVML ----
+    gpu_temperature_c: float
+
+    # ---- Utilization (%) ----
+    gpu_utilization: float        # NVML compute utilization
+    gpu_memory_utilization: float # NVML memory bandwidth utilization
+    cpu_utilization: float        # psutil
+
+    # ---- Timestamp ----
     timestamp: str
 
 
 class HardwareTrainerStats(base.TrainerStats):
     """
-    TrainerStats implementation with hardware monitoring
-    
-    Collects timing (like SimpleTrainerStats) plus the metrics:
-    - GPU memory usage (allocated, reserved, peak)
-    - GPU utilization %
-    - CPU utilization %
-    
-    Exports all data to CSV for plotting.
-    
-    Params
+    TrainerStats with hardware monitoring including power & energy.
+
+    Power measurement approach:
+    - Sample GPU power (NVML nvmlDeviceGetPowerUsage) at start and end of each phase
+    - Compute per-phase energy:
+        E_phase = ((P_start + P_end) / 2) × duration_seconds
+    - This should be accurate for phases >~50ms where power is relatively stable to avoid innacurate power data
+
+    Parameters
     ----------
     device : torch.device
     The PyTorch device used for training
@@ -127,9 +141,9 @@ class HardwareTrainerStats(base.TrainerStats):
     Unique identifier for this run. Auto-generated if not provided.
 
     num_train_steps : int
-    number of training steps for logging
+    number of trianing steps for logging
     """
-    
+
     def __init__(
         self,
         device: torch.device,
@@ -142,64 +156,82 @@ class HardwareTrainerStats(base.TrainerStats):
         self.output_dir = output_dir
         self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.num_train_steps = num_train_steps
-        
-        # Create output directory
+
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Initialize NVML for GPU monitoring
+
+        # Initialize NVML
         self.nvml_handle = None
+        self.gpu_name = "unknown"
+        self.gpu_power_limit_w = 0.0
         if PYNVML_AVAILABLE and device.type == 'cuda':
             try:
                 pynvml.nvmlInit()
                 device_index = device.index if device.index is not None else 0
                 self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-                logger.info(f"NVML initialized for GPU {device_index}")
+                self.gpu_name = pynvml.nvmlDeviceGetName(self.nvml_handle)
+                if isinstance(self.gpu_name, bytes):
+                    self.gpu_name = self.gpu_name.decode('utf-8')
+                # Power limit in watts (NVML returns milliwatts)
+                try:
+                    self.gpu_power_limit_w = pynvml.nvmlDeviceGetPowerManagementLimit(
+                        self.nvml_handle
+                    ) / 1000.0
+                except pynvml.NVMLError:
+                    self.gpu_power_limit_w = 0.0
+                    logger.warning("Could not query GPU power management limit")
+
+                logger.info(
+                    f"NVML initialized: {self.gpu_name}, "
+                    f"power limit={self.gpu_power_limit_w:.0f}W"
+                )
             except Exception as e:
                 logger.warning(f"Could not initialize NVML: {e}")
-        
-        # Storage for all step records
+
+        # Storage
         self.step_records: List[StepRecord] = []
-        
-        # Current step tracking
         self.current_step = 0
-        
+
         # Timing accumulators (nanoseconds)
         self._step_start_ns = 0
         self._forward_start_ns = 0
         self._backward_start_ns = 0
         self._optimizer_start_ns = 0
         self._checkpoint_start_ns = 0
-        
+
         self._forward_time_ns = 0
         self._backward_time_ns = 0
         self._optimizer_time_ns = 0
-        
+
+        # Power accumulators (watts)
+        self._power_forward_start_w = 0.0
+        self._power_forward_end_w = 0.0
+        self._power_backward_start_w = 0.0
+        self._power_backward_end_w = 0.0
+        self._power_optimizer_start_w = 0.0
+        self._power_optimizer_end_w = 0.0
+
         logger.info(
             f"HardwareTrainerStats initialized: "
             f"output_dir={output_dir}, run_id={self.run_id}, "
+            f"gpu={self.gpu_name}, "
             f"nvml={'yes' if self.nvml_handle else 'no'}, "
             f"psutil={'yes' if PSUTIL_AVAILABLE else 'no'}"
         )
-    
+
+    # ==================== Helpers ====================
+
     def _sync_cuda(self) -> None:
-        """Synchronize CUDA for accurate timing."""
+        """Synchronize CUDA for accurate timing"""
         if self.device.type == 'cuda':
             torch.cuda.synchronize(self.device)
-    
+
     def _time_ns(self) -> int:
-        """Get current time in nanoseconds."""
         return time.perf_counter_ns()
-    
+
     def _get_gpu_memory(self) -> tuple:
-        """
-        Get GPU memory stats
-        
-        Returns:
-            (allocated_bytes, reserved_bytes, peak_bytes)
-        """
+        """Returns (allocated_bytes, reserved_bytes, peak_bytes) via PyTorch"""
         if self.device.type != 'cuda':
             return (0, 0, 0)
-        
         try:
             allocated = torch.cuda.memory_allocated(self.device)
             reserved = torch.cuda.memory_reserved(self.device)
@@ -207,299 +239,342 @@ class HardwareTrainerStats(base.TrainerStats):
             return (allocated, reserved, peak)
         except Exception:
             return (0, 0, 0)
-    
-    def _get_gpu_utilization(self) -> float:
-        """Get GPU utilization percentage (0-100)."""
+
+    def _get_gpu_power_w(self) -> float:
+        """Get instantaneous GPU power draw in Watts via NVML"""
         if self.nvml_handle:
             try:
-                util = pynvml.nvmlDeviceGetUtilizationRates(self.nvml_handle)
-                return float(util.gpu)
+                # nvmlDeviceGetPowerUsage returns milliwatts
+                return pynvml.nvmlDeviceGetPowerUsage(self.nvml_handle) / 1000.0
             except Exception:
                 pass
         return 0.0
-    
+
+    def _get_gpu_temperature(self) -> float:
+        """Get GPU temperature in Celsius via NVML"""
+        if self.nvml_handle:
+            try:
+                return float(pynvml.nvmlDeviceGetTemperature(
+                    self.nvml_handle, pynvml.NVML_TEMPERATURE_GPU
+                ))
+            except Exception:
+                pass
+        return 0.0
+
+    def _get_gpu_utilization(self) -> tuple:
+        """
+        Returns (compute_util%, memory_bandwidth_util%) via NVML
+        
+        Note: 'memory' here is memory BANDWIDTH utilization,
+        NOT memory capacity utilization. This is the proportion of time
+        the memory subsystem was actively reading/writing to purposely avoid capturing unecessary data.
+        """
+        if self.nvml_handle:
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(self.nvml_handle)
+                return (float(util.gpu), float(util.memory))
+            except Exception:
+                pass
+        return (0.0, 0.0)
+
     def _get_cpu_utilization(self) -> float:
-        """Get CPU utilization percentage (0-100)."""
         if PSUTIL_AVAILABLE:
             try:
                 return psutil.cpu_percent(interval=None)
             except Exception:
                 pass
         return 0.0
-    
+
+    @staticmethod
+    def _compute_energy_j(power_start_w: float, power_end_w: float,
+                          duration_ns: int) -> float:
+        """
+        Compute energy in Joules using trapezoid approximation
+        E = ((P_start + P_end) / 2) × duration_seconds
+        """
+        avg_power_w = (power_start_w + power_end_w) / 2.0
+        duration_s = duration_ns / 1_000_000_000.0
+        return avg_power_w * duration_s
+
     # ==================== TrainerStats Interface ====================
-    
+
     def start_train(self) -> None:
-        """Called at the start of training."""
-        logger.info(f"Starting training with hardware monitoring (run_id={self.run_id})")
-        
-        # Reset peak memory tracking
+        logger.info(
+            f"Starting training with hardware+energy monitoring "
+            f"(run_id={self.run_id}, gpu={self.gpu_name})"
+        )
         if self.device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats(self.device)
-        
-        # Initialize CPU monitoring
         if PSUTIL_AVAILABLE:
-            psutil.cpu_percent(interval=None)  # First call initializes
-    
+            psutil.cpu_percent(interval=None)  # Initialize
+
     def stop_train(self) -> None:
-        """Called at the end of training."""
-        logger.info("Training complete. Saving hardware stats...")
+        logger.info("Training complete. Saving hardware+energy stats...")
         self._save_results()
-        
-        # Cleanup NVML
         if self.nvml_handle:
             try:
                 pynvml.nvmlShutdown()
             except Exception:
                 pass
-    
+
     def start_step(self) -> None:
-        """Called at the start of each training step."""
         self._sync_cuda()
         self._step_start_ns = self._time_ns()
-        
-        # Reset peak memory for this step
+
         if self.device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats(self.device)
-        
-        # Reset phase accumulators
+
+        # Reset accumulators
         self._forward_time_ns = 0
         self._backward_time_ns = 0
         self._optimizer_time_ns = 0
-    
+        self._power_forward_start_w = 0.0
+        self._power_forward_end_w = 0.0
+        self._power_backward_start_w = 0.0
+        self._power_backward_end_w = 0.0
+        self._power_optimizer_start_w = 0.0
+        self._power_optimizer_end_w = 0.0
+
     def stop_step(self) -> None:
-        """Called at the end of each training step."""
         self._sync_cuda()
         step_time_ns = self._time_ns() - self._step_start_ns
-        
+
         # Collect hardware metrics
         gpu_mem = self._get_gpu_memory()
-        gpu_util = self._get_gpu_utilization()
+        gpu_util, mem_util = self._get_gpu_utilization()
         cpu_util = self._get_cpu_utilization()
-        
-        # Create record
+        gpu_temp = self._get_gpu_temperature()
+
+        # Compute per-phase energy (Joules)
+        energy_forward = self._compute_energy_j(
+            self._power_forward_start_w, self._power_forward_end_w,
+            self._forward_time_ns
+        )
+        energy_backward = self._compute_energy_j(
+            self._power_backward_start_w, self._power_backward_end_w,
+            self._backward_time_ns
+        )
+        energy_optimizer = self._compute_energy_j(
+            self._power_optimizer_start_w, self._power_optimizer_end_w,
+            self._optimizer_time_ns
+        )
+        energy_step = energy_forward + energy_backward + energy_optimizer
+
         record = StepRecord(
             step_num=self.current_step,
-            step_time_ns=step_time_ns,
-            forward_time_ns=self._forward_time_ns,
-            backward_time_ns=self._backward_time_ns,
-            optimizer_time_ns=self._optimizer_time_ns,
-            gpu_memory_allocated=gpu_mem[0],
-            gpu_memory_reserved=gpu_mem[1],
-            gpu_memory_peak=gpu_mem[2],
+            step_time_ms=step_time_ns / 1_000_000,
+            forward_time_ms=self._forward_time_ns / 1_000_000,
+            backward_time_ms=self._backward_time_ns / 1_000_000,
+            optimizer_time_ms=self._optimizer_time_ns / 1_000_000,
+            gpu_memory_allocated_mb=gpu_mem[0] / (1024 * 1024),
+            gpu_memory_reserved_mb=gpu_mem[1] / (1024 * 1024),
+            gpu_memory_peak_mb=gpu_mem[2] / (1024 * 1024),
+            gpu_power_forward_start_w=self._power_forward_start_w,
+            gpu_power_forward_end_w=self._power_forward_end_w,
+            gpu_power_backward_start_w=self._power_backward_start_w,
+            gpu_power_backward_end_w=self._power_backward_end_w,
+            gpu_power_optimizer_start_w=self._power_optimizer_start_w,
+            gpu_power_optimizer_end_w=self._power_optimizer_end_w,
+            energy_forward_j=energy_forward,
+            energy_backward_j=energy_backward,
+            energy_optimizer_j=energy_optimizer,
+            energy_step_j=energy_step,
+            gpu_temperature_c=gpu_temp,
             gpu_utilization=gpu_util,
+            gpu_memory_utilization=mem_util,
             cpu_utilization=cpu_util,
             timestamp=datetime.now().isoformat(),
         )
         self.step_records.append(record)
-        
         self.current_step += 1
-    
+
     def start_forward(self) -> None:
-        """Called at the start of forward pass."""
         self._sync_cuda()
+        self._power_forward_start_w = self._get_gpu_power_w()
         self._forward_start_ns = self._time_ns()
-    
+
     def stop_forward(self) -> None:
-        """Called at the end of forward pass."""
         self._sync_cuda()
         self._forward_time_ns = self._time_ns() - self._forward_start_ns
-    
+        self._power_forward_end_w = self._get_gpu_power_w()
+
     def start_backward(self) -> None:
-        """Called at the start of backward pass."""
         self._sync_cuda()
+        self._power_backward_start_w = self._get_gpu_power_w()
         self._backward_start_ns = self._time_ns()
-    
+
     def stop_backward(self) -> None:
-        """Called at the end of backward pass."""
         self._sync_cuda()
         self._backward_time_ns = self._time_ns() - self._backward_start_ns
-    
+        self._power_backward_end_w = self._get_gpu_power_w()
+
     def start_optimizer_step(self) -> None:
-        """Called at the start of optimizer step."""
         self._sync_cuda()
+        self._power_optimizer_start_w = self._get_gpu_power_w()
         self._optimizer_start_ns = self._time_ns()
-    
+
     def stop_optimizer_step(self) -> None:
-        """Called at the end of optimizer step."""
         self._sync_cuda()
         self._optimizer_time_ns = self._time_ns() - self._optimizer_start_ns
-    
+        self._power_optimizer_end_w = self._get_gpu_power_w()
+
     def start_save_checkpoint(self) -> None:
-        """Called at the start of checkpointing."""
         self._sync_cuda()
         self._checkpoint_start_ns = self._time_ns()
-    
+
     def stop_save_checkpoint(self) -> None:
-        """Called at the end of checkpointing."""
         self._sync_cuda()
-        # Currently not tracking checkpoint time in records
         pass
-    
+
     def log_loss(self, loss: torch.Tensor) -> None:
-        """Log loss value (NOTE currently not stored)"""
         pass
-    
+
     def log_step(self) -> None:
-        """Log the previous step's measurements."""
+        """Log the previous step's measurements to console"""
         if not self.step_records:
             return
-        
+
         rec = self.step_records[-1]
-        step_ms = rec.step_time_ns / 1_000_000
-        fwd_ms = rec.forward_time_ns / 1_000_000
-        bwd_ms = rec.backward_time_ns / 1_000_000
-        opt_ms = rec.optimizer_time_ns / 1_000_000
-        mem_mb = rec.gpu_memory_allocated / (1024 * 1024)
-        
-        print(
-            f"step {step_ms:.2f} -- "
-            f"forward {fwd_ms:.2f} -- "
-            f"backward {bwd_ms:.2f} -- "
-            f"optimizer step {opt_ms:.2f} -- "
-            f"GPU mem {mem_mb:.0f}MB -- "
-            f"GPU util {rec.gpu_utilization:.0f}%"
+        avg_power = (
+            (rec.gpu_power_forward_start_w + rec.gpu_power_forward_end_w +
+             rec.gpu_power_backward_start_w + rec.gpu_power_backward_end_w +
+             rec.gpu_power_optimizer_start_w + rec.gpu_power_optimizer_end_w) / 6.0
         )
-    
+
+        print(
+            f"[Step {rec.step_num:4d}] "
+            f"total={rec.step_time_ms:.1f}ms | "
+            f"fwd={rec.forward_time_ms:.1f}ms | "
+            f"bwd={rec.backward_time_ms:.1f}ms | "
+            f"opt={rec.optimizer_time_ms:.1f}ms | "
+            f"power={avg_power:.1f}W | "
+            f"energy={rec.energy_step_j*1000:.2f}mJ | "
+            f"temp={rec.gpu_temperature_c:.0f}°C | "
+            f"mem={rec.gpu_memory_allocated_mb:.0f}MB | "
+            f"util={rec.gpu_utilization:.0f}%"
+        )
+
     def log_stats(self) -> None:
-        """Log summary statistics"""
-        if not self.step_records:
-            print("No step records collected")
+        """Log summary statistics at end of training."""
+        if len(self.step_records) < 2:
+            logger.warning("Not enough steps for statistics")
             return
-        
-        # Separate warmup (first step) from steady state
-        warmup = self.step_records[0] if self.step_records else None
-        steady = self.step_records[1:] if len(self.step_records) > 1 else self.step_records
-        
-        def avg(records, field):
-            values = [getattr(r, field) for r in records]
-            return sum(values) / len(values) if values else 0
-        
-        def to_ms(ns):
-            return ns / 1_000_000
-        
-        def to_mb(b):
-            return b / (1024 * 1024)
-        
-        print("\n" + "=" * 80)
-        print("                    HARDWARE MONITORING RESULTS")
-        print("=" * 80)
-        print(f"Run ID: {self.run_id}")
-        print(f"Total Steps: {len(self.step_records)}")
-        print(f"Output Directory: {self.output_dir}")
-        
-        if warmup:
-            print("\n" + "-" * 40)
-            print("WARMUP (Step 0)")
-            print("-" * 40)
-            print(f"  Step Time:          {to_ms(warmup.step_time_ns):.2f} ms")
-            print(f"  Forward:            {to_ms(warmup.forward_time_ns):.2f} ms")
-            print(f"  Backward:           {to_ms(warmup.backward_time_ns):.2f} ms")
-            print(f"  Optimizer:          {to_ms(warmup.optimizer_time_ns):.2f} ms")
-            print(f"  GPU Memory:         {to_mb(warmup.gpu_memory_allocated):.1f} MB")
-            print(f"  GPU Peak Memory:    {to_mb(warmup.gpu_memory_peak):.1f} MB")
-            print(f"  GPU Utilization:    {warmup.gpu_utilization:.1f}%")
-        
-        if steady:
-            print("\n" + "-" * 40)
-            print("STEADY STATE (Excluding Step 0)")
-            print("-" * 40)
-            
-            avg_step = to_ms(avg(steady, 'step_time_ns'))
-            avg_fwd = to_ms(avg(steady, 'forward_time_ns'))
-            avg_bwd = to_ms(avg(steady, 'backward_time_ns'))
-            avg_opt = to_ms(avg(steady, 'optimizer_time_ns'))
-            avg_mem = to_mb(avg(steady, 'gpu_memory_allocated'))
-            peak_mem = to_mb(max(r.gpu_memory_peak for r in steady))
-            avg_gpu_util = avg(steady, 'gpu_utilization')
-            avg_cpu_util = avg(steady, 'cpu_utilization')
-            
-            print(f"  Avg Step Time:      {avg_step:.2f} ms")
-            print(f"  Avg Forward:        {avg_fwd:.2f} ms ({avg_fwd/avg_step*100:.1f}%)")
-            print(f"  Avg Backward:       {avg_bwd:.2f} ms ({avg_bwd/avg_step*100:.1f}%)")
-            print(f"  Avg Optimizer:      {avg_opt:.2f} ms ({avg_opt/avg_step*100:.1f}%)")
-            print(f"  Avg GPU Memory:     {avg_mem:.1f} MB")
-            print(f"  Peak GPU Memory:    {peak_mem:.1f} MB")
-            print(f"  Avg GPU Util:       {avg_gpu_util:.1f}%")
-            print(f"  Avg CPU Util:       {avg_cpu_util:.1f}%")
-            print(f"  Throughput:         {1000/avg_step:.2f} steps/sec")
-            
-            if warmup:
-                overhead = to_ms(warmup.step_time_ns) / avg_step
-                print(f"  Warmup Overhead:    {overhead:.2f}x")
-        
-        print("\n" + "=" * 80)
-        print(f"Results saved to: {self.output_dir}")
-        print("=" * 80 + "\n")
-    
+
+        # Exclude warmup (step 0) for steady-state stats
+        steady = self.step_records[1:]
+
+        avg_step = sum(r.step_time_ms for r in steady) / len(steady)
+        avg_fwd = sum(r.forward_time_ms for r in steady) / len(steady)
+        avg_bwd = sum(r.backward_time_ms for r in steady) / len(steady)
+        avg_opt = sum(r.optimizer_time_ms for r in steady) / len(steady)
+        avg_energy = sum(r.energy_step_j for r in steady) / len(steady)
+        total_energy = sum(r.energy_step_j for r in self.step_records)
+        avg_temp = sum(r.gpu_temperature_c for r in steady) / len(steady)
+
+        # Average power per phase
+        avg_power_fwd = sum(
+            (r.gpu_power_forward_start_w + r.gpu_power_forward_end_w) / 2
+            for r in steady
+        ) / len(steady)
+        avg_power_bwd = sum(
+            (r.gpu_power_backward_start_w + r.gpu_power_backward_end_w) / 2
+            for r in steady
+        ) / len(steady)
+        avg_power_opt = sum(
+            (r.gpu_power_optimizer_start_w + r.gpu_power_optimizer_end_w) / 2
+            for r in steady
+        ) / len(steady)
+
+        print("\n" + "=" * 70)
+        print("HARDWARE + ENERGY SUMMARY (Steady State, excluding warmup)")
+        print("=" * 70)
+        print(f"GPU: {self.gpu_name}")
+        print(f"Power Limit: {self.gpu_power_limit_w:.0f}W")
+        print(f"Steps: {len(self.step_records)} total, {len(steady)} steady-state")
+        print()
+        print(f"--- Timing ---")
+        print(f"  Avg step:      {avg_step:.2f} ms")
+        print(f"  Avg forward:   {avg_fwd:.2f} ms ({avg_fwd/avg_step*100:.1f}%)")
+        print(f"  Avg backward:  {avg_bwd:.2f} ms ({avg_bwd/avg_step*100:.1f}%)")
+        print(f"  Avg optimizer: {avg_opt:.2f} ms ({avg_opt/avg_step*100:.1f}%)")
+        print()
+        print(f"--- Power (steady state average) ---")
+        print(f"  Forward:   {avg_power_fwd:.1f} W")
+        print(f"  Backward:  {avg_power_bwd:.1f} W")
+        print(f"  Optimizer: {avg_power_opt:.1f} W")
+        print()
+        print(f"--- Energy ---")
+        print(f"  Avg per step:  {avg_energy*1000:.2f} mJ")
+        print(f"  Total training: {total_energy:.3f} J")
+        print(f"  Total training: {total_energy/3600*1000:.4f} mWh")
+        print()
+        print(f"--- Thermal ---")
+        print(f"  Avg GPU temp:  {avg_temp:.1f} °C")
+        print("=" * 70)
+
+    # ==================== Output ====================
+
     def _save_results(self) -> None:
-        """Save all results to CSV and JSON files."""
+        """Save all step records to CSV and metadata to JSON"""
         if not self.step_records:
-            logger.warning("No records to save")
+            logger.warning("No step records to save")
             return
-        
-        # Save step-level CSV
-        csv_path = os.path.join(self.output_dir, f"hardware_stats_{self.run_id}.csv")
-        
-        fieldnames = [
-            'step_num',
-            'step_time_ms', 'forward_time_ms', 'backward_time_ms', 'optimizer_time_ms',
-            'gpu_memory_allocated_mb', 'gpu_memory_reserved_mb', 'gpu_memory_peak_mb',
-            'gpu_utilization', 'cpu_utilization',
-            'timestamp'
-        ]
-        
+
+        # --- CSV ---
+        csv_path = os.path.join(
+            self.output_dir, f"hardware_stats_{self.run_id}.csv"
+        )
+        fieldnames = [f.name for f in fields(StepRecord)]
+
         with open(csv_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            
-            for rec in self.step_records:
-                row = {
-                    'step_num': rec.step_num,
-                    'step_time_ms': rec.step_time_ns / 1_000_000,
-                    'forward_time_ms': rec.forward_time_ns / 1_000_000,
-                    'backward_time_ms': rec.backward_time_ns / 1_000_000,
-                    'optimizer_time_ms': rec.optimizer_time_ns / 1_000_000,
-                    'gpu_memory_allocated_mb': rec.gpu_memory_allocated / (1024 * 1024),
-                    'gpu_memory_reserved_mb': rec.gpu_memory_reserved / (1024 * 1024),
-                    'gpu_memory_peak_mb': rec.gpu_memory_peak / (1024 * 1024),
-                    'gpu_utilization': rec.gpu_utilization,
-                    'cpu_utilization': rec.cpu_utilization,
-                    'timestamp': rec.timestamp,
-                }
-                writer.writerow(row)
-        
-        logger.info(f"Step metrics saved to: {csv_path}")
-        
-        # Save metadata JSON
+            for record in self.step_records:
+                writer.writerow(asdict(record))
+
+        logger.info(f"Saved {len(self.step_records)} step records to {csv_path}")
+
+        # --- Metadata JSON ---
         steady = self.step_records[1:] if len(self.step_records) > 1 else self.step_records
-        
-        def avg(records, field):
-            values = [getattr(r, field) for r in records]
-            return sum(values) / len(values) if values else 0
-        
+        total_energy = sum(r.energy_step_j for r in self.step_records)
+
         metadata = {
             "run_id": self.run_id,
-            "timestamp": datetime.now().isoformat(),
+            "gpu_name": self.gpu_name,
+            "gpu_power_limit_w": self.gpu_power_limit_w,
             "device": str(self.device),
             "num_steps": len(self.step_records),
+            "num_steady_state_steps": len(steady),
             "nvml_available": self.nvml_handle is not None,
             "psutil_available": PSUTIL_AVAILABLE,
-            "summary": {
-                "avg_step_time_ms": avg(steady, 'step_time_ns') / 1_000_000,
-                "avg_forward_time_ms": avg(steady, 'forward_time_ns') / 1_000_000,
-                "avg_backward_time_ms": avg(steady, 'backward_time_ns') / 1_000_000,
-                "avg_optimizer_time_ms": avg(steady, 'optimizer_time_ns') / 1_000_000,
-                "avg_gpu_memory_mb": avg(steady, 'gpu_memory_allocated') / (1024 * 1024),
-                "peak_gpu_memory_mb": max(r.gpu_memory_peak for r in steady) / (1024 * 1024) if steady else 0,
-                "avg_gpu_utilization": avg(steady, 'gpu_utilization'),
-                "avg_cpu_utilization": avg(steady, 'cpu_utilization'),
-                "warmup_step_time_ms": self.step_records[0].step_time_ns / 1_000_000 if self.step_records else 0,
-            }
+            "total_energy_j": total_energy,
+            "avg_step_energy_mj": (
+                sum(r.energy_step_j for r in steady) / len(steady) * 1000
+                if steady else 0
+            ),
+            "avg_step_time_ms": (
+                sum(r.step_time_ms for r in steady) / len(steady)
+                if steady else 0
+            ),
+            "avg_gpu_power_w": (
+                sum(
+                    (r.gpu_power_forward_start_w + r.gpu_power_forward_end_w +
+                     r.gpu_power_backward_start_w + r.gpu_power_backward_end_w +
+                     r.gpu_power_optimizer_start_w + r.gpu_power_optimizer_end_w) / 6.0
+                    for r in steady
+                ) / len(steady) if steady else 0
+            ),
+            "timestamp_start": self.step_records[0].timestamp,
+            "timestamp_end": self.step_records[-1].timestamp,
         }
-        
-        json_path = os.path.join(self.output_dir, f"metadata_{self.run_id}.json")
+
+        json_path = os.path.join(
+            self.output_dir, f"metadata_{self.run_id}.json"
+        )
         with open(json_path, 'w') as f:
             json.dump(metadata, f, indent=2)
-        
-        logger.info(f"Metadata saved to: {json_path}")
+
+        logger.info(f"Saved metadata to {json_path}")
+
+        # Print summary
+        self.log_stats()

@@ -1,0 +1,1 @@
+../scripts/bash_srun.sh "cp /home/slurm/comp597/students/rdapal/t5-hardware/hardware_stats_20260220_144251.csv /home/2021/rdapal/COMP597/COMP597-starter-code/hardware_stats/ && cp /home/slurm/comp597/students/rdapal/t5-hardware/metadata_20260220_144251.json /home/2021/rdapal/COMP597/COMP597-starter-code/hardware_stats/"
