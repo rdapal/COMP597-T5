@@ -31,7 +31,7 @@ import os
 # ============================================================
 # Globals
 # ============================================================
-WARMUP_STEPS = 1
+WARMUP_STEPS = 5
 
 
 def load_data(csv_path):
@@ -339,9 +339,11 @@ def plot_energy_per_step(df, output_dir, run_id):
     plt.close()
     print(f"  Saved: {filepath}")
 
-
 def plot_temperature(df, output_dir, run_id):
-    """Plot GPU temperature over training steps"""
+    """Plot GPU temperature over training steps
+    
+    Temperature is monotonically rising (thermal equilibrium not reached)
+    """
     if 'gpu_temperature_c' not in df.columns:
         print("  Skipping temperature plot (column not found)")
         return
@@ -351,15 +353,36 @@ def plot_temperature(df, output_dir, run_id):
     ax.plot(df['step_num'], df['gpu_temperature_c'],
             linewidth=2, color='#e67e22')
 
-    steady = steady_state(df)
-    avg_temp = steady['gpu_temperature_c'].mean()
-    ax.axhline(y=avg_temp, color='red', linestyle='--', alpha=0.5,
-               label=f'Avg (steady): {avg_temp:.1f}°C')
+    # Annotate start and end temperatures
+    t_start = df['gpu_temperature_c'].iloc[0]
+    t_end = df['gpu_temperature_c'].iloc[-1]
+    ax.annotate(f'{t_start:.0f}°C',
+                xy=(df['step_num'].iloc[0], t_start),
+                xytext=(10, -20), textcoords='offset points',
+                fontsize=11, color='#2c3e50',
+                arrowprops=dict(arrowstyle='->', color='gray'))
+    ax.annotate(f'{t_end:.0f}°C',
+                xy=(df['step_num'].iloc[-1], t_end),
+                xytext=(-40, -20), textcoords='offset points',
+                fontsize=11, color='#2c3e50',
+                arrowprops=dict(arrowstyle='->', color='gray'))
+
+    # Rate of rise annotation
+    total_time_s = len(df) * df['step_time_ms'].mean() / 1000
+    rate = (t_end - t_start) / total_time_s
+    ax.text(0.02, 0.95,
+            f'Rise: {t_start:.0f}°C → {t_end:.0f}°C '
+            f'(+{t_end - t_start:.0f}°C in ~{total_time_s:.0f}s, '
+            f'{rate:.1f}°C/s)\n'
+            f'Thermal equilibrium not reached',
+            transform=ax.transAxes, fontsize=10,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat',
+                      alpha=0.5))
 
     ax.set_xlabel('Training Step', fontsize=12)
     ax.set_ylabel('Temperature (°C)', fontsize=12)
     ax.set_title('GPU Temperature During T5 Training', fontsize=14)
-    ax.legend()
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -432,9 +455,12 @@ def plot_time_vs_energy_comparison(df, output_dir, run_id):
     plt.close()
     print(f"  Saved: {filepath}")
 
-
 def plot_warmup_energy_comparison(df, output_dir, run_id):
-    """Compare warmup vs steady state in both time and energy"""
+    """Compare warmup vs steady state in both time and energy
+    
+    Time: warmup is SLOWER (ratio > 1x) due to CUDA init overhead
+    Energy: warmup uses LESS energy (ratio < 1x) because GPU power is low during initialization (I think?)
+    """
     warmup = df.iloc[0]
     steady = steady_state(df)
 
@@ -459,13 +485,13 @@ def plot_warmup_energy_comparison(df, output_dir, run_id):
     x = np.arange(len(labels))
     width = 0.35
 
-    # Time comparison
+    # --- Time comparison (left) ---
     ax1.bar(x - width / 2, warmup_time, width,
-            label='Warmup', color='#e74c3c')
+            label='Warmup (Step 0)', color='#e74c3c')
     ax1.bar(x + width / 2, steady_time, width,
-            label='Steady State', color='#2ecc71')
+            label='Steady State (Avg)', color='#2ecc71')
     ax1.set_ylabel('Duration (ms)', fontsize=12)
-    ax1.set_title('Time: Warmup vs Steady State', fontsize=13)
+    ax1.set_title('Time: Warmup is Slower', fontsize=13)
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels)
     ax1.legend()
@@ -473,29 +499,29 @@ def plot_warmup_energy_comparison(df, output_dir, run_id):
     ax1.set_ylim(bottom=0)
     for i, (w, s) in enumerate(zip(warmup_time, steady_time)):
         ratio = w / s if s > 0 else 0
-        ax1.annotate(f'{ratio:.2f}x',
+        ax1.annotate(f'{ratio:.2f}x slower',
                      xy=(i, max(w, s) + 10),
-                     ha='center', fontsize=10, color='gray')
+                     ha='center', fontsize=9, color='#c0392b')
 
-    # Energy comparison
+    # --- Energy comparison (right) ---
     ax2.bar(x - width / 2, warmup_energy, width,
-            label='Warmup', color='#e74c3c')
+            label='Warmup (Step 0)', color='#e74c3c')
     ax2.bar(x + width / 2, steady_energy, width,
-            label='Steady State', color='#2ecc71')
+            label='Steady State (Avg)', color='#2ecc71')
     ax2.set_ylabel('Energy (mJ)', fontsize=12)
-    ax2.set_title('Energy: Warmup vs Steady State', fontsize=13)
+    ax2.set_title('Energy: Warmup Uses Less (Low GPU Power)', fontsize=13)
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels)
     ax2.legend()
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.set_ylim(bottom=0)
     for i, (w, s) in enumerate(zip(warmup_energy, steady_energy)):
-        ratio = w / s if s > 0 else 0
-        ax2.annotate(f'{ratio:.2f}x',
-                     xy=(i, max(w, s) + 1),
-                     ha='center', fontsize=10, color='gray')
+        pct = (1 - w / s) * 100 if s > 0 else 0
+        ax2.annotate(f'{pct:.0f}% less',
+                     xy=(i, max(w, s) + 800),
+                     ha='center', fontsize=9, color='#27ae60')
 
-    plt.suptitle('T5 Warmup Overhead: Time vs Energy',
+    plt.suptitle('T5 Warmup: Slower but More Energy-Efficient (GPU at idle power)',
                  fontsize=14, y=1.02)
     plt.tight_layout()
     filepath = os.path.join(

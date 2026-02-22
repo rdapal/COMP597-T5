@@ -41,6 +41,12 @@ class TrainerStats(ABC):
         pass
 
     @abstractmethod
+    def start_data_transfer(self) -> None:
+        """ Called before CPU to GPU batch transfer for measurement
+        """
+        pass
+
+    @abstractmethod
     def stop_step(self) -> None:
         """Stop a training step.
 
@@ -49,6 +55,13 @@ class TrainerStats(ABC):
         
         """
         pass
+
+    @abstractmethod
+    def stop_data_transfer(self) -> None:
+        """ Called before CPU to GPU batch transfer for measurement
+        """
+        pass
+
 
     @abstractmethod
     def start_forward(self) -> None:

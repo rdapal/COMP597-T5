@@ -190,12 +190,12 @@ class Trainer(ABC):
         i
             This is the iteration number.
         batch
-            The data of the current batch. The type is defined by the 
-            `DataLoader` provided when the object was constructed. It must be a 
-            dictionary or similar as it is unpacked to the model using 
-            `**batch`.
+            The data of the current batch. The type is defined by the
+            `DataLoader` provided when the object was constructed. It must be a
+            dictionary or similar as it is unpacked to the model using
+            ``**batch``.
         model_kwargs
-            Additional arguments that need to be provided to the model during 
+            Additional arguments that need to be provided to the model during
             the forward pass.
 
         Returns
@@ -203,27 +203,39 @@ class Trainer(ABC):
         torch.Tensor
             The loss computed during the iteration.
         str, optional
-            Any additional information to print before updating the progress 
-            bar. This allows allows properly printing an update without 
+            Any additional information to print before updating the progress
+            bar. This allows allows properly printing an update without
             breaking, overwriting or duplicating the progress bar.
 
+        Notes
+        -----
+        Data transfer from CPU to GPU is now explicitly timed as a separate phase.
+        This captures the cost of process_batch() which was previously
+        invisible to the stats system.
         """
         if model_kwargs is None:
             model_kwargs = {}
-        batch = self.process_batch(i, batch)
 
+        # Phase 1: Data transfer (CPU → GPU)
+        self.stats.start_data_transfer()
+        batch = self.process_batch(i, batch)
+        self.stats.stop_data_transfer()
+
+        # Phase 2: Forward pass
         self.stats.start_forward()
         loss = self.forward(i, batch, model_kwargs)
         self.stats.stop_forward()
 
+        # Phase 3: Backward pass
         self.stats.start_backward()
         self.backward(i, loss)
         self.stats.stop_backward()
 
+        # Phase 4: Optimizer step
         self.stats.start_optimizer_step()
         self.optimizer_step(i)
         self.stats.stop_optimizer_step()
-        
+
         return loss, None
 
     def train(self, model_kwargs : Optional[Dict[str, Any]]) -> None:
