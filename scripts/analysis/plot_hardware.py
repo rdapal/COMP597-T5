@@ -1,384 +1,533 @@
 """
-Plot hardware monitoring results for T5 energy analysis
+Plot hardware monitoring results for T5 energy analysis v.2
 
-Generates plots from hardware_stats CSV files:
-  Timing:
-    1. Phase Duration vs Training Step
-    2. Phase Breakdown Pie Chart
-    3. Warmup Comparison Bar Chart
-  Hardware:
-    4. GPU Memory Usage vs Training Step
-    5. GPU Utilization vs Training Step
-  Energy:
-    6. GPU Power Draw Per Phase vs Training Step
-    7. Energy Breakdown Pie Chart
-    8. Per-Step Energy vs Training Step
-    9. GPU Temperature vs Training Step
-    10. Time vs Energy Comparison
-    11. Warmup Energy Comparison
+Generates 9 plots from hardware_stats v2 CSV:
+
+  1. Phase Durations         — line plot, all phases over training steps
+  2. Time vs Energy          — grouped bar, phase proportions side-by-side
+  3. GPU Power per Phase     — line plot, shows warmup ramp + steady state
+  4. Warmup Analysis         — dual-panel: time (slower) vs energy (cheaper)
+  5. Energy per Step         — dual-axis: per-step + cumulative
+  6. CO2 Emissions           — dual-axis: per-step + cumulative
+  7. GPU Memory              — line plot: allocated / reserved / peak
+  8. GPU Utilization         — line plot with steady-state average
+  9. GPU Temperature         — line plot with thermal rise annotation
 
 Usage:
-    python scripts/analysis/plot_hardware.py --csv <path_to_csv> --output <output_dir>
-    python scripts/analysis/plot_hardware.py --csv <path_to_csv> --output <output_dir> --run_id t5_energy
+    python scripts/analysis/plot_hardware.py --csv <path> --output <dir>
+    python scripts/analysis/plot_hardware.py --csv <path> --output <dir> --run_id t5_v2
 """
 
 import argparse
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
 import os
 
-# ============================================================
-# Globals
-# ============================================================
-WARMUP_STEPS = 5
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
+# ============================================================
+# Configuration
+# ============================================================
+WARMUP_STEPS = 6
+
+# Consistent colour scheme across all plots
+C_DATA_TRANSFER = '#f39c12'  # amber
+C_FORWARD       = '#3498db'  # blue
+C_BACKWARD      = '#e74c3c'  # red
+C_OPTIMIZER     = '#2ecc71'  # green
+C_OVERHEAD      = '#95a5a6'  # grey
+C_TOTAL         = '#9b59b6'  # purple
+C_WARMUP        = '#e74c3c'
+C_STEADY        = '#2ecc71'
+C_ENERGY        = '#e74c3c'
+C_CUMULATIVE    = '#3498db'
+C_CO2           = '#27ae60'
+C_CO2_CUM       = '#2c3e50'
+C_TEMPERATURE   = '#e67e22'
+C_UTILIZATION   = '#e67e22'
+
+
+# ============================================================
+# Helpers
+# ============================================================
 
 def load_data(csv_path):
-    """Load hardware stats CSV"""
     df = pd.read_csv(csv_path)
-    print(f"Columns found: {list(df.columns)}")
+    print(f"  Columns: {len(df.columns)}, Rows: {len(df)}")
     return df
 
 
-def has_power_data(df):
-    """Check if DataFrame contains power/energy columns"""
-    return ('energy_step_j' in df.columns
-            and 'gpu_power_forward_start_w' in df.columns)
-
-
-def steady_state(df):
-    """Return DataFrame excluding warmup steps"""
+def steady(df):
     return df.iloc[WARMUP_STEPS:]
 
 
+def has_v2_columns(df):
+    """Check CSV format (data_transfer, overhead, co2)"""
+    return all(c in df.columns for c in [
+        'data_transfer_time_ms', 'overhead_time_ms',
+        'energy_overhead_j', 'co2_step_mg',
+    ])
+
+
+def savefig(fig, output_dir, name, run_id):
+    path = os.path.join(output_dir, f"{name}_{run_id}.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved: {path}")
+
+
 # ============================================================
-# TIMING PLOTS
+# Plot 1: Phase Durations over Training Steps
 # ============================================================
 
 def plot_phase_durations(df, output_dir, run_id):
-    """Plot phase durations over training steps"""
+    """All phase durations as time series. Shows CUDA warmup spike
+    at step 0 and steady-state stability"""
     fig, ax = plt.subplots(figsize=(12, 6))
 
     ax.plot(df['step_num'], df['forward_time_ms'],
-            label='Forward', linewidth=2, color='#3498db')
+            label='Forward', lw=2, color=C_FORWARD)
     ax.plot(df['step_num'], df['backward_time_ms'],
-            label='Backward', linewidth=2, color='#e74c3c')
+            label='Backward', lw=2, color=C_BACKWARD)
     ax.plot(df['step_num'], df['optimizer_time_ms'],
-            label='Optimizer', linewidth=2, color='#2ecc71')
+            label='Optimizer', lw=2, color=C_OPTIMIZER)
+
+    if 'overhead_time_ms' in df.columns:
+        ax.plot(df['step_num'], df['overhead_time_ms'],
+                label='Overhead', lw=1.5, color=C_OVERHEAD, linestyle=':')
+
     ax.plot(df['step_num'], df['step_time_ms'],
-            label='Total', linewidth=2, color='#9b59b6',
-            linestyle='--', alpha=0.7)
+            label='Total Step', lw=2, color=C_TOTAL, linestyle='--', alpha=0.7)
 
     ax.set_xlabel('Training Step', fontsize=12)
     ax.set_ylabel('Duration (ms)', fontsize=12)
     ax.set_title('Phase Durations During T5 Training', fontsize=14)
-    ax.legend()
+    ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(bottom=0)
 
-    plt.tight_layout()
-    filepath = os.path.join(output_dir, f"phase_durations_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
-
-
-def plot_phase_breakdown(df, output_dir, run_id):
-    """Plot phase breakdown pie chart"""
-    steady = steady_state(df)
-
-    avg_forward = steady['forward_time_ms'].mean()
-    avg_backward = steady['backward_time_ms'].mean()
-    avg_optimizer = steady['optimizer_time_ms'].mean()
-
-    sizes = [avg_forward, avg_backward, avg_optimizer]
-    labels = [
-        f'Forward\n{avg_forward:.1f}ms',
-        f'Backward\n{avg_backward:.1f}ms',
-        f'Optimizer\n{avg_optimizer:.1f}ms',
-    ]
-    colors = ['#3498db', '#e74c3c', '#2ecc71']
-    explode = (0, 0.05, 0)
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie(sizes, labels=labels, colors=colors, explode=explode,
-           autopct='%1.1f%%', startangle=90,
-           textprops={'fontsize': 11})
-    ax.set_title(
-        'T5 Training Phase Breakdown — Time (Steady State)', fontsize=14
+    # Annotate step 0 spike
+    step0_total = df['step_time_ms'].iloc[0]
+    ss_total = steady(df)['step_time_ms'].mean()
+    ax.annotate(
+        f'Step 0: {step0_total:.0f}ms\n({step0_total/ss_total:.1f}× steady)',
+        xy=(0, step0_total), xytext=(15, step0_total - 30),
+        fontsize=9, color='#7f8c8d',
+        arrowprops=dict(arrowstyle='->', color='#7f8c8d', lw=0.8),
     )
 
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"phase_breakdown_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'phase_durations', run_id)
 
 
-def plot_warmup_comparison(df, output_dir, run_id):
-    """Compare warmup vs steady state"""
-    warmup = df.iloc[0]
-    steady = steady_state(df)
+# ============================================================
+# Plot 2: Time vs Energy — Grouped Bar (replaces both pie charts)
+# ============================================================
 
-    metrics = [
-        'step_time_ms', 'forward_time_ms',
-        'backward_time_ms', 'optimizer_time_ms',
-    ]
-    labels = ['Total', 'Forward', 'Backward', 'Optimizer']
+def plot_time_vs_energy(df, output_dir, run_id):
+    """Side-by-side time% and energy% for all phases.
+    Key insight: near-identical proportions because GPU power is
+    constant across phases (~214W)"""
+    ss = steady(df)
 
-    warmup_vals = [warmup[m] for m in metrics]
-    steady_vals = [steady[m].mean() for m in metrics]
+    # Compute averages
+    t_dt  = ss['data_transfer_time_ms'].mean() if 'data_transfer_time_ms' in df.columns else 0
+    t_fwd = ss['forward_time_ms'].mean()
+    t_bwd = ss['backward_time_ms'].mean()
+    t_opt = ss['optimizer_time_ms'].mean()
+    t_oh  = ss['overhead_time_ms'].mean() if 'overhead_time_ms' in df.columns else 0
 
-    x = np.arange(len(labels))
+    e_dt  = ss['energy_data_transfer_j'].mean() * 1000 if 'energy_data_transfer_j' in df.columns else 0
+    e_fwd = ss['energy_forward_j'].mean() * 1000
+    e_bwd = ss['energy_backward_j'].mean() * 1000
+    e_opt = ss['energy_optimizer_j'].mean() * 1000
+    e_oh  = ss['energy_overhead_j'].mean() * 1000 if 'energy_overhead_j' in df.columns else 0
+
+    # Only show phases with >0.5% contribution to avoid clutter
+    t_total = t_dt + t_fwd + t_bwd + t_opt + t_oh
+    e_total = e_dt + e_fwd + e_bwd + e_opt + e_oh
+
+    phases, time_pcts, energy_pcts, colors = [], [], [], []
+    for label, t_val, e_val, color in [
+        ('Data\nTransfer', t_dt, e_dt, C_DATA_TRANSFER),
+        ('Forward',        t_fwd, e_fwd, C_FORWARD),
+        ('Backward',       t_bwd, e_bwd, C_BACKWARD),
+        ('Optimizer',      t_opt, e_opt, C_OPTIMIZER),
+        ('Overhead',       t_oh, e_oh, C_OVERHEAD),
+    ]:
+        t_pct = t_val / t_total * 100 if t_total > 0 else 0
+        e_pct = e_val / e_total * 100 if e_total > 0 else 0
+        if t_pct >= 0.5 or e_pct >= 0.5:
+            phases.append(label)
+            time_pcts.append(t_pct)
+            energy_pcts.append(e_pct)
+            colors.append(color)
+
+    x = np.arange(len(phases))
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(x - width / 2, warmup_vals, width,
-           label='Warmup (Step 0)', color='#e74c3c')
-    ax.bar(x + width / 2, steady_vals, width,
-           label='Steady State (Avg)', color='#2ecc71')
+    bars_t = ax.bar(x - width/2, time_pcts, width,
+                    label='Time (%)', color=C_FORWARD, alpha=0.8)
+    bars_e = ax.bar(x + width/2, energy_pcts, width,
+                    label='Energy (%)', color=C_ENERGY, alpha=0.8)
 
-    ax.set_ylabel('Duration (ms)', fontsize=12)
-    ax.set_title('T5 Warmup vs Steady State Performance', fontsize=14)
+    # Value labels
+    for bar, val in zip(bars_t, time_pcts):
+        if val >= 1.0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f'{val:.1f}%', ha='center', va='bottom', fontsize=10)
+    for bar, val in zip(bars_e, energy_pcts):
+        if val >= 1.0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f'{val:.1f}%', ha='center', va='bottom', fontsize=10)
+
+    ax.set_ylabel('Proportion (%)', fontsize=12)
+    ax.set_title('T5 Phase Breakdown: Time vs Energy (Steady State)', fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.legend()
+    ax.set_xticklabels(phases, fontsize=11)
+    ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3, axis='y')
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(0, max(max(time_pcts), max(energy_pcts)) + 10)
 
-    for i, (w, s) in enumerate(zip(warmup_vals, steady_vals)):
-        overhead = w / s if s > 0 else 0
-        ax.annotate(
-            f'{overhead:.2f}x',
-            xy=(i, max(w, s) + 15),
-            ha='center', fontsize=10, color='gray',
-        )
+    # Annotation: key insight
+    ax.text(0.98, 0.95,
+            'Time ≈ Energy because GPU power\n'
+            'is constant across phases (~214W)',
+            transform=ax.transAxes, fontsize=9, ha='right', va='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8))
 
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"warmup_comparison_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'time_vs_energy', run_id)
 
 
 # ============================================================
-# HARDWARE PLOTS
-# ============================================================
-
-def plot_gpu_memory(df, output_dir, run_id):
-    """Plot GPU memory usage over training steps"""
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    ax.plot(df['step_num'], df['gpu_memory_allocated_mb'],
-            label='Allocated', linewidth=2, color='#2ecc71')
-    ax.plot(df['step_num'], df['gpu_memory_reserved_mb'],
-            label='Reserved', linewidth=2, color='#3498db', linestyle='--')
-    ax.plot(df['step_num'], df['gpu_memory_peak_mb'],
-            label='Peak', linewidth=2, color='#e74c3c', linestyle=':')
-
-    ax.set_xlabel('Training Step', fontsize=12)
-    ax.set_ylabel('GPU Memory (MB)', fontsize=12)
-    ax.set_title('GPU Memory Usage During T5 Training', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(bottom=0)
-
-    plt.tight_layout()
-    filepath = os.path.join(output_dir, f"gpu_memory_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
-
-
-def plot_gpu_utilization(df, output_dir, run_id):
-    """Plot GPU utilization over training steps"""
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    ax.plot(df['step_num'], df['gpu_utilization'],
-            linewidth=2, color='#e67e22', marker='o', markersize=2)
-
-    steady = steady_state(df)
-    avg_util = steady['gpu_utilization'].mean()
-    ax.axhline(y=avg_util, color='red', linestyle='--',
-               label=f'Avg (steady state): {avg_util:.1f}%')
-
-    ax.set_xlabel('Training Step', fontsize=12)
-    ax.set_ylabel('GPU Utilization (%)', fontsize=12)
-    ax.set_title('GPU Utilization During T5 Training', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 105)
-
-    plt.tight_layout()
-    filepath = os.path.join(output_dir, f"gpu_utilization_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
-
-
-# ============================================================
-# ENERGY & POWER PLOTs
+# Plot 3: GPU Power per Phase over Training Steps
 # ============================================================
 
 def plot_gpu_power(df, output_dir, run_id):
-    """Plot GPU power draw per phase over training steps"""
+    """Per-phase average power. Shows power warmup ramp (steps 0-5)
+    decoupled from timing warmup (step 0 only)"""
     df = df.copy()
     df['power_forward_w'] = (
-        df['gpu_power_forward_start_w'] + df['gpu_power_forward_end_w']
-    ) / 2.0
+        df['gpu_power_forward_start_w'] + df['gpu_power_forward_end_w']) / 2
     df['power_backward_w'] = (
-        df['gpu_power_backward_start_w'] + df['gpu_power_backward_end_w']
-    ) / 2.0
+        df['gpu_power_backward_start_w'] + df['gpu_power_backward_end_w']) / 2
     df['power_optimizer_w'] = (
-        df['gpu_power_optimizer_start_w'] + df['gpu_power_optimizer_end_w']
-    ) / 2.0
+        df['gpu_power_optimizer_start_w'] + df['gpu_power_optimizer_end_w']) / 2
 
-    steady = steady_state(df)
+    ss = steady(df)
 
     fig, ax = plt.subplots(figsize=(12, 6))
+    for col, label, color in [
+        ('power_forward_w',   f"Forward (avg {ss['power_forward_w'].mean():.1f}W)",   C_FORWARD),
+        ('power_backward_w',  f"Backward (avg {ss['power_backward_w'].mean():.1f}W)",  C_BACKWARD),
+        ('power_optimizer_w', f"Optimizer (avg {ss['power_optimizer_w'].mean():.1f}W)", C_OPTIMIZER),
+    ]:
+        ax.plot(df['step_num'], df[col], label=label, lw=1.5, color=color, alpha=0.8)
 
-    ax.plot(
-        df['step_num'], df['power_forward_w'],
-        label=f"Forward (avg {steady['power_forward_w'].mean():.1f}W)",
-        linewidth=1.5, color='#3498db', alpha=0.8,
-    )
-    ax.plot(
-        df['step_num'], df['power_backward_w'],
-        label=f"Backward (avg {steady['power_backward_w'].mean():.1f}W)",
-        linewidth=1.5, color='#e74c3c', alpha=0.8,
-    )
-    ax.plot(
-        df['step_num'], df['power_optimizer_w'],
-        label=f"Optimizer (avg {steady['power_optimizer_w'].mean():.1f}W)",
-        linewidth=1.5, color='#2ecc71', alpha=0.8,
-    )
+    # Warmup region shading
+    ax.axvspan(-0.5, WARMUP_STEPS - 0.5, alpha=0.08, color='red', label='Power warmup')
+
+    # NVML caveat
+    ax.text(0.98, 0.05,
+            'Note: NVML refresh ~50–100ms;\n'
+            'phases <50ms have aliased readings',
+            transform=ax.transAxes, fontsize=8, ha='right', va='bottom',
+            color='#7f8c8d', style='italic')
 
     ax.set_xlabel('Training Step', fontsize=12)
     ax.set_ylabel('Power (W)', fontsize=12)
     ax.set_title('GPU Power Draw Per Phase During T5 Training', fontsize=14)
-    ax.legend()
+    ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(bottom=0)
 
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"gpu_power_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'gpu_power', run_id)
 
 
-def plot_energy_breakdown(df, output_dir, run_id):
-    """Plot energy breakdown pie chart"""
-    steady = steady_state(df)
+# ============================================================
+# Plot 4: Warmup Analysis — Dual Panel
+# ============================================================
 
-    avg_energy_fwd = steady['energy_forward_j'].mean() * 1000
-    avg_energy_bwd = steady['energy_backward_j'].mean() * 1000
-    avg_energy_opt = steady['energy_optimizer_j'].mean() * 1000
+def plot_warmup_analysis(df, output_dir, run_id):
+    """Time (warmup slower) vs energy (warmup cheaper).
+    """
+    warmup = df.iloc[0]
+    ss = steady(df)
 
-    sizes = [avg_energy_fwd, avg_energy_bwd, avg_energy_opt]
-    labels = [
-        f'Forward\n{avg_energy_fwd:.1f}mJ',
-        f'Backward\n{avg_energy_bwd:.1f}mJ',
-        f'Optimizer\n{avg_energy_opt:.1f}mJ',
-    ]
-    colors = ['#3498db', '#e74c3c', '#2ecc71']
-    explode = (0, 0.05, 0)
+    labels = ['Total', 'Forward', 'Backward', 'Optimizer']
+    time_cols = ['step_time_ms', 'forward_time_ms',
+                 'backward_time_ms', 'optimizer_time_ms']
+    energy_cols = ['energy_step_j', 'energy_forward_j',
+                   'energy_backward_j', 'energy_optimizer_j']
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie(sizes, labels=labels, colors=colors, explode=explode,
-           autopct='%1.1f%%', startangle=90,
-           textprops={'fontsize': 11})
-    ax.set_title(
-        'T5 Training Phase Breakdown — Energy (Steady State)', fontsize=14
-    )
+    w_time = [warmup[c] for c in time_cols]
+    s_time = [ss[c].mean() for c in time_cols]
+    w_energy = [warmup[c] * 1000 for c in energy_cols]
+    s_energy = [ss[c].mean() * 1000 for c in energy_cols]
 
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    x = np.arange(len(labels))
+    width = 0.35
+
+    # Left: Time
+    ax1.bar(x - width/2, w_time, width, label='Warmup (Step 0)', color=C_WARMUP)
+    ax1.bar(x + width/2, s_time, width, label='Steady State (Avg)', color=C_STEADY)
+    ax1.set_ylabel('Duration (ms)', fontsize=12)
+    ax1.set_title('Time: Warmup is Slower (CUDA JIT)', fontsize=13)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.set_ylim(bottom=0)
+    for i, (w, s) in enumerate(zip(w_time, s_time)):
+        ratio = w / s if s > 0 else 0
+        ax1.annotate(f'{ratio:.2f}×', xy=(i, max(w, s) + 10),
+                     ha='center', fontsize=9, color='#c0392b')
+
+    # Right: Energy
+    ax2.bar(x - width/2, w_energy, width, label='Warmup (Step 0)', color=C_WARMUP)
+    ax2.bar(x + width/2, s_energy, width, label='Steady State (Avg)', color=C_STEADY)
+    ax2.set_ylabel('Energy (mJ)', fontsize=12)
+    ax2.set_title('Energy: Warmup Uses Less (GPU at idle power)', fontsize=13)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels)
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_ylim(bottom=0)
+    for i, (w, s) in enumerate(zip(w_energy, s_energy)):
+        pct = (1 - w / s) * 100 if s > 0 else 0
+        ax2.annotate(f'{pct:.0f}% less', xy=(i, max(w, s) + 800),
+                     ha='center', fontsize=9, color='#27ae60')
+
+    fig.suptitle('T5 Warmup: Slower but More Energy-Efficient',
+                 fontsize=14, y=1.02)
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"energy_breakdown_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'warmup_analysis', run_id)
 
+
+# ============================================================
+# Plot 5: Energy per Step + Cumulative
+# ============================================================
 
 def plot_energy_per_step(df, output_dir, run_id):
-    """Plot per-step energy with cumulative overlay"""
+    """Per-step energy with cumulative overlay and steady-state average"""
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
     energy_mj = df['energy_step_j'] * 1000
     cumulative_j = df['energy_step_j'].cumsum()
+    ss = steady(df)
+    avg_mj = ss['energy_step_j'].mean() * 1000
 
-    color1 = '#e74c3c'
-    ax1.plot(df['step_num'], energy_mj, color=color1, linewidth=1.5,
+    ax1.plot(df['step_num'], energy_mj, color=C_ENERGY, lw=1.5,
              alpha=0.8, label='Per-step energy')
-    ax1.set_xlabel('Training Step', fontsize=12)
-    ax1.set_ylabel('Energy per Step (mJ)', fontsize=12, color=color1)
-    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.axhline(y=avg_mj, color=C_ENERGY, linestyle='--', alpha=0.5,
+                label=f'Steady avg: {avg_mj:.1f} mJ/step')
 
-    steady = steady_state(df)
-    avg_energy_mj = steady['energy_step_j'].mean() * 1000
-    ax1.axhline(y=avg_energy_mj, color=color1, linestyle='--', alpha=0.5,
-                label=f'Steady avg: {avg_energy_mj:.1f} mJ/step')
+    ax1.set_xlabel('Training Step', fontsize=12)
+    ax1.set_ylabel('Energy per Step (mJ)', fontsize=12, color=C_ENERGY)
+    ax1.tick_params(axis='y', labelcolor=C_ENERGY)
 
     ax2 = ax1.twinx()
-    color2 = '#3498db'
-    ax2.plot(df['step_num'], cumulative_j, color=color2, linewidth=2,
-             linestyle='--', alpha=0.7, label='Cumulative energy')
-    ax2.set_ylabel('Cumulative Energy (J)', fontsize=12, color=color2)
-    ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.plot(df['step_num'], cumulative_j, color=C_CUMULATIVE,
+             lw=2, linestyle='--', alpha=0.7, label='Cumulative energy')
+    ax2.set_ylabel('Cumulative Energy (J)', fontsize=12, color=C_CUMULATIVE)
+    ax2.tick_params(axis='y', labelcolor=C_CUMULATIVE)
 
+    # Total annotation
+    total_j = cumulative_j.iloc[-1]
+    ax2.annotate(f'Total: {total_j:.0f} J ({total_j/3600:.2f} Wh)',
+                 xy=(df['step_num'].iloc[-1], total_j),
+                 xytext=(-120, -20), textcoords='offset points',
+                 fontsize=10, color=C_CUMULATIVE,
+                 arrowprops=dict(arrowstyle='->', color=C_CUMULATIVE))
+
+    # Combined legend
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right', fontsize=10)
 
     ax1.set_title('Energy Consumption During T5 Training', fontsize=14)
     ax1.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"energy_per_step_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'energy_per_step', run_id)
 
-def plot_temperature(df, output_dir, run_id):
-    """Plot GPU temperature over training steps
-    
-    Temperature is monotonically rising (thermal equilibrium not reached)
-    """
+
+# ============================================================
+# Plot 6: CO2 Emissions per Step + Cumulative
+# ============================================================
+
+def plot_co2_emissions(df, output_dir, run_id):
+    """CO2 emissions per step with cumulative overlay"""
+    if 'co2_step_mg' not in df.columns:
+        print("    Skipping CO2 plot (column not found)")
+        return
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    co2_mg = df['co2_step_mg']
+    cumulative_mg = co2_mg.cumsum()
+    ss = steady(df)
+    avg_co2 = ss['co2_step_mg'].mean()
+
+    ax1.plot(df['step_num'], co2_mg, color=C_CO2, lw=1.5,
+             alpha=0.8, label='Per-step CO₂')
+    ax1.axhline(y=avg_co2, color=C_CO2, linestyle='--', alpha=0.5,
+                label=f'Steady avg: {avg_co2:.4f} mg/step')
+    ax1.set_xlabel('Training Step', fontsize=12)
+    ax1.set_ylabel('CO₂ per Step (mg)', fontsize=12, color=C_CO2)
+    ax1.tick_params(axis='y', labelcolor=C_CO2)
+
+    ax2 = ax1.twinx()
+    ax2.plot(df['step_num'], cumulative_mg, color=C_CO2_CUM,
+             lw=2, linestyle='--', alpha=0.7, label='Cumulative CO₂')
+    ax2.set_ylabel('Cumulative CO₂ (mg)', fontsize=12, color=C_CO2_CUM)
+    ax2.tick_params(axis='y', labelcolor=C_CO2_CUM)
+
+    # Total annotation
+    total_mg = cumulative_mg.iloc[-1]
+    ax2.annotate(f'Total: {total_mg:.2f} mg\n({total_mg/1000:.4f} g CO₂eq)',
+                 xy=(df['step_num'].iloc[-1], total_mg),
+                 xytext=(-140, -25), textcoords='offset points',
+                 fontsize=10, color=C_CO2_CUM,
+                 arrowprops=dict(arrowstyle='->', color=C_CO2_CUM))
+
+    # Carbon intensity note
+    ax1.text(0.02, 0.95,
+             'Carbon intensity: Quebec (Hydro-Québec)\n≈ 30 gCO₂eq/kWh',
+             transform=ax1.transAxes, fontsize=9, va='top',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='honeydew', alpha=0.8))
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right', fontsize=10)
+
+    ax1.set_title('CO₂ Emissions During T5 Training', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    savefig(fig, output_dir, 'co2_emissions', run_id)
+
+
+# ============================================================
+# Plot 7: GPU Memory
+# ============================================================
+
+def plot_gpu_memory(df, output_dir, run_id):
+    """GPU memory: allocated vs reserved vs peak.
+    Distinguishes true usage from caching allocator overhead"""
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.plot(df['step_num'], df['gpu_memory_allocated_mb'],
+            label='Allocated (actual tensors)', lw=2, color=C_OPTIMIZER)
+    ax.plot(df['step_num'], df['gpu_memory_reserved_mb'],
+            label='Reserved (caching allocator)', lw=2,
+            color=C_FORWARD, linestyle='--')
+    ax.plot(df['step_num'], df['gpu_memory_peak_mb'],
+            label='Peak (max during step)', lw=2,
+            color=C_BACKWARD, linestyle=':')
+
+    # VRAM capacity line
+    ax.axhline(y=32768, color='black', linestyle='--', alpha=0.3, lw=1)
+    ax.text(df['step_num'].iloc[-1], 32768 + 300, '32 GB VRAM',
+            ha='right', fontsize=9, color='#7f8c8d')
+
+    ss = steady(df)
+    alloc = ss['gpu_memory_allocated_mb'].mean()
+    peak = ss['gpu_memory_peak_mb'].mean()
+    reserved = ss['gpu_memory_reserved_mb'].mean()
+    ax.text(0.02, 0.55,
+            f'Steady state:\n'
+            f'  Allocated: {alloc/1024:.1f} GB ({alloc/32768*100:.0f}% of VRAM)\n'
+            f'  Peak:      {peak/1024:.1f} GB ({peak/32768*100:.0f}% of VRAM)\n'
+            f'  Reserved:  {reserved/1024:.1f} GB ({reserved/32768*100:.0f}% of VRAM)',
+            transform=ax.transAxes, fontsize=9, va='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8),
+            family='monospace')
+
+    ax.set_xlabel('Training Step', fontsize=12)
+    ax.set_ylabel('GPU Memory (MB)', fontsize=12)
+    ax.set_title('GPU Memory Usage During T5 Training', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)
+
+    plt.tight_layout()
+    savefig(fig, output_dir, 'gpu_memory', run_id)
+
+
+# ============================================================
+# Plot 8: GPU Utilization
+# ============================================================
+
+def plot_gpu_utilization(df, output_dir, run_id):
+    """GPU compute utilization with steady-state average"""
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.plot(df['step_num'], df['gpu_utilization'],
+            lw=2, color=C_UTILIZATION, marker='o', markersize=2)
+
+    ss = steady(df)
+    avg = ss['gpu_utilization'].mean()
+    ax.axhline(y=avg, color='red', linestyle='--',
+               label=f'Steady avg: {avg:.1f}%')
+
+    ax.text(0.98, 0.15,
+            'Synthetic data → zero I/O bottleneck\n→ near-100% GPU utilization',
+            transform=ax.transAxes, fontsize=9, ha='right', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8))
+
+    ax.set_xlabel('Training Step', fontsize=12)
+    ax.set_ylabel('GPU Utilization (%)', fontsize=12)
+    ax.set_title('GPU Compute Utilization During T5 Training', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 105)
+
+    plt.tight_layout()
+    savefig(fig, output_dir, 'gpu_utilization', run_id)
+
+
+# ============================================================
+# Plot 9: GPU Temperature
+# ============================================================
+
+def plot_gpu_temperature(df, output_dir, run_id):
+    """GPU temperature over training. Monotonic rise = thermal
+    equilibrium not reached in the short run"""
     if 'gpu_temperature_c' not in df.columns:
-        print("  Skipping temperature plot (column not found)")
+        print("    Skipping temperature plot (column not found)")
         return
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
     ax.plot(df['step_num'], df['gpu_temperature_c'],
-            linewidth=2, color='#e67e22')
+            lw=2, color=C_TEMPERATURE)
 
-    # Annotate start and end temperatures
     t_start = df['gpu_temperature_c'].iloc[0]
     t_end = df['gpu_temperature_c'].iloc[-1]
+
     ax.annotate(f'{t_start:.0f}°C',
-                xy=(df['step_num'].iloc[0], t_start),
-                xytext=(10, -20), textcoords='offset points',
-                fontsize=11, color='#2c3e50',
+                xy=(0, t_start), xytext=(15, -20),
+                textcoords='offset points', fontsize=11,
                 arrowprops=dict(arrowstyle='->', color='gray'))
     ax.annotate(f'{t_end:.0f}°C',
                 xy=(df['step_num'].iloc[-1], t_end),
-                xytext=(-40, -20), textcoords='offset points',
-                fontsize=11, color='#2c3e50',
+                xytext=(-40, -20), textcoords='offset points', fontsize=11,
                 arrowprops=dict(arrowstyle='->', color='gray'))
 
-    # Rate of rise annotation
-    total_time_s = len(df) * df['step_time_ms'].mean() / 1000
-    rate = (t_end - t_start) / total_time_s
+    total_time_s = df['step_time_ms'].sum() / 1000
+    rate = (t_end - t_start) / total_time_s if total_time_s > 0 else 0
     ax.text(0.02, 0.95,
             f'Rise: {t_start:.0f}°C → {t_end:.0f}°C '
             f'(+{t_end - t_start:.0f}°C in ~{total_time_s:.0f}s, '
             f'{rate:.1f}°C/s)\n'
             f'Thermal equilibrium not reached',
-            transform=ax.transAxes, fontsize=10,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat',
-                      alpha=0.5))
+            transform=ax.transAxes, fontsize=10, va='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=0.5))
 
     ax.set_xlabel('Training Step', fontsize=12)
     ax.set_ylabel('Temperature (°C)', fontsize=12)
@@ -386,332 +535,118 @@ def plot_temperature(df, output_dir, run_id):
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filepath = os.path.join(output_dir, f"gpu_temperature_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
-
-
-def plot_time_vs_energy_comparison(df, output_dir, run_id):
-    """Side-by-side time% vs energy% plot"""
-    steady = steady_state(df)
-
-    t_fwd = steady['forward_time_ms'].mean()
-    t_bwd = steady['backward_time_ms'].mean()
-    t_opt = steady['optimizer_time_ms'].mean()
-
-    e_fwd = steady['energy_forward_j'].mean() * 1000
-    e_bwd = steady['energy_backward_j'].mean() * 1000
-    e_opt = steady['energy_optimizer_j'].mean() * 1000
-
-    t_total = t_fwd + t_bwd + t_opt
-    e_total = e_fwd + e_bwd + e_opt
-
-    phases = ['Forward', 'Backward', 'Optimizer']
-    time_pcts = [
-        t_fwd / t_total * 100,
-        t_bwd / t_total * 100,
-        t_opt / t_total * 100,
-    ]
-    energy_pcts = [
-        e_fwd / e_total * 100,
-        e_bwd / e_total * 100,
-        e_opt / e_total * 100,
-    ]
-
-    x = np.arange(len(phases))
-    width = 0.35
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bars1 = ax.bar(x - width / 2, time_pcts, width,
-                   label='Time (%)', color='#3498db', alpha=0.8)
-    bars2 = ax.bar(x + width / 2, energy_pcts, width,
-                   label='Energy (%)', color='#e74c3c', alpha=0.8)
-
-    for bar, val in zip(bars1, time_pcts):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.5,
-                f'{val:.1f}%', ha='center', va='bottom',
-                fontsize=10, color='#2c3e50')
-    for bar, val in zip(bars2, energy_pcts):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.5,
-                f'{val:.1f}%', ha='center', va='bottom',
-                fontsize=10, color='#2c3e50')
-
-    ax.set_ylabel('Proportion (%)', fontsize=12)
-    ax.set_title(
-        'T5 Phase Breakdown: Time vs Energy (Steady State)', fontsize=14
-    )
-    ax.set_xticks(x)
-    ax.set_xticklabels(phases, fontsize=12)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.set_ylim(0, 70)
-
-    plt.tight_layout()
-    filepath = os.path.join(output_dir, f"time_vs_energy_{run_id}.png")
-    plt.savefig(filepath, dpi=150)
-    plt.close()
-    print(f"  Saved: {filepath}")
-
-def plot_warmup_energy_comparison(df, output_dir, run_id):
-    """Compare warmup vs steady state in both time and energy
-    
-    Time: warmup is SLOWER (ratio > 1x) due to CUDA init overhead
-    Energy: warmup uses LESS energy (ratio < 1x) because GPU power is low during initialization (I think?)
-    """
-    warmup = df.iloc[0]
-    steady = steady_state(df)
-
-    labels = ['Total', 'Forward', 'Backward', 'Optimizer']
-
-    time_metrics = [
-        'step_time_ms', 'forward_time_ms',
-        'backward_time_ms', 'optimizer_time_ms',
-    ]
-    energy_metrics = [
-        'energy_step_j', 'energy_forward_j',
-        'energy_backward_j', 'energy_optimizer_j',
-    ]
-
-    warmup_time = [warmup[m] for m in time_metrics]
-    steady_time = [steady[m].mean() for m in time_metrics]
-    warmup_energy = [warmup[m] * 1000 for m in energy_metrics]
-    steady_energy = [steady[m].mean() * 1000 for m in energy_metrics]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-    x = np.arange(len(labels))
-    width = 0.35
-
-    # --- Time comparison (left) ---
-    ax1.bar(x - width / 2, warmup_time, width,
-            label='Warmup (Step 0)', color='#e74c3c')
-    ax1.bar(x + width / 2, steady_time, width,
-            label='Steady State (Avg)', color='#2ecc71')
-    ax1.set_ylabel('Duration (ms)', fontsize=12)
-    ax1.set_title('Time: Warmup is Slower', fontsize=13)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3, axis='y')
-    ax1.set_ylim(bottom=0)
-    for i, (w, s) in enumerate(zip(warmup_time, steady_time)):
-        ratio = w / s if s > 0 else 0
-        ax1.annotate(f'{ratio:.2f}x slower',
-                     xy=(i, max(w, s) + 10),
-                     ha='center', fontsize=9, color='#c0392b')
-
-    # --- Energy comparison (right) ---
-    ax2.bar(x - width / 2, warmup_energy, width,
-            label='Warmup (Step 0)', color='#e74c3c')
-    ax2.bar(x + width / 2, steady_energy, width,
-            label='Steady State (Avg)', color='#2ecc71')
-    ax2.set_ylabel('Energy (mJ)', fontsize=12)
-    ax2.set_title('Energy: Warmup Uses Less (Low GPU Power)', fontsize=13)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3, axis='y')
-    ax2.set_ylim(bottom=0)
-    for i, (w, s) in enumerate(zip(warmup_energy, steady_energy)):
-        pct = (1 - w / s) * 100 if s > 0 else 0
-        ax2.annotate(f'{pct:.0f}% less',
-                     xy=(i, max(w, s) + 800),
-                     ha='center', fontsize=9, color='#27ae60')
-
-    plt.suptitle('T5 Warmup: Slower but More Energy-Efficient (GPU at idle power)',
-                 fontsize=14, y=1.02)
-    plt.tight_layout()
-    filepath = os.path.join(
-        output_dir, f"warmup_energy_comparison_{run_id}.png"
-    )
-    plt.savefig(filepath, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {filepath}")
+    savefig(fig, output_dir, 'gpu_temperature', run_id)
 
 
 # ============================================================
-# TEXT SUMMARY
+# Text Summary
 # ============================================================
 
 def print_summary(df):
-    """print text summary of key findings"""
-    steady = steady_state(df)
-    power = has_power_data(df)
+    """Console summary matching v2 CSV format"""
+    ss = steady(df)
+    v2 = has_v2_columns(df)
 
-    print("\n" + "=" * 60)
-    print("SUMMARY OF KEY FINDINGS")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print("PLOT SUMMARY — KEY NUMBERS")
+    print("=" * 65)
+    print(f"Steps: {len(df)} total, {WARMUP_STEPS} warmup, {len(ss)} steady")
 
-    print(f"\nTotal steps: {len(df)} "
-          f"({WARMUP_STEPS} warmup, {len(steady)} steady-state)")
-
-    # ---- Timing ----
+    # Timing
     print(f"\n--- Timing (steady state) ---")
-    for phase, col in [
-        ('Forward', 'forward_time_ms'),
-        ('Backward', 'backward_time_ms'),
-        ('Optimizer', 'optimizer_time_ms'),
-        ('Total step', 'step_time_ms'),
-    ]:
-        avg = steady[col].mean()
-        std = steady[col].std()
-        print(f"  {phase:12s}: {avg:7.2f} +/- {std:.2f} ms")
+    cols = [('Forward', 'forward_time_ms'), ('Backward', 'backward_time_ms'),
+            ('Optimizer', 'optimizer_time_ms')]
+    if v2:
+        cols = [('Data xfer', 'data_transfer_time_ms')] + cols + [('Overhead', 'overhead_time_ms')]
+    cols.append(('Total', 'step_time_ms'))
+    for label, col in cols:
+        avg = ss[col].mean()
+        pct = avg / ss['step_time_ms'].mean() * 100
+        print(f"  {label:12s}: {avg:7.2f} ms  ({pct:5.1f}%)")
 
-    phase_sum = (
-        steady['forward_time_ms']
-        + steady['backward_time_ms']
-        + steady['optimizer_time_ms']
-    ).mean()
-    step_avg = steady['step_time_ms'].mean()
-    gap = step_avg - phase_sum
-    print(f"  {'Data xfer':12s}: {gap:7.2f} ms (step - phases)")
-
-    # ---- Memory ----
-    print(f"\n--- GPU Memory (steady state) ---")
-    print(f"  Allocated: {steady['gpu_memory_allocated_mb'].mean():.0f} MB")
-    print(f"  Reserved:  {steady['gpu_memory_reserved_mb'].mean():.0f} MB")
-    print(f"  Peak:      {steady['gpu_memory_peak_mb'].mean():.0f} MB")
-
-    # ---- Utilization ----
-    print(f"\n--- GPU Utilization (steady state) ---")
-    print(f"  Compute: {steady['gpu_utilization'].mean():.1f}%")
-    if 'gpu_memory_utilization' in df.columns:
-        mem_util = steady['gpu_memory_utilization'].mean()
-        print(f"  Memory bandwidth: {mem_util:.1f}%")
-
-    # ---- Power ----
-    if power:
-        print(f"\n--- Power (steady state) ---")
-        for phase, sc, ec in [
-            ('Forward',
-             'gpu_power_forward_start_w', 'gpu_power_forward_end_w'),
-            ('Backward',
-             'gpu_power_backward_start_w', 'gpu_power_backward_end_w'),
-            ('Optimizer',
-             'gpu_power_optimizer_start_w', 'gpu_power_optimizer_end_w'),
-        ]:
-            avg_p = ((steady[sc] + steady[ec]) / 2).mean()
-            std_p = ((steady[sc] + steady[ec]) / 2).std()
-            print(f"  {phase:12s}: {avg_p:6.1f} +/- {std_p:.1f} W")
-
-    # ---- Energy ----
-    if power:
+    # Energy
+    if 'energy_step_j' in df.columns:
+        total_j = df['energy_step_j'].sum()
+        avg_mj = ss['energy_step_j'].mean() * 1000
         print(f"\n--- Energy ---")
-        total_e = df['energy_step_j'].sum()
-        avg_e = steady['energy_step_j'].mean() * 1000
-        warmup_e = df.iloc[0]['energy_step_j'] * 1000
-        print(f"  Total training:  {total_e:.3f} J "
-              f"({total_e / 3600 * 1000:.4f} mWh)")
-        print(f"  Avg per step:    {avg_e:.2f} mJ")
-        print(f"  Warmup step:     {warmup_e:.2f} mJ")
+        print(f"  Total:   {total_j:.1f} J ({total_j/3600:.4f} Wh)")
+        print(f"  Avg/step: {avg_mj:.1f} mJ (steady)")
 
-    # ---- Temperature ----
-    if power and 'gpu_temperature_c' in df.columns:
-        print(f"\n--- Temperature ---")
-        print(f"  Avg: {steady['gpu_temperature_c'].mean():.1f} C")
-        print(f"  Min: {steady['gpu_temperature_c'].min():.1f} C")
-        print(f"  Max: {steady['gpu_temperature_c'].max():.1f} C")
+    # CO2
+    if 'co2_step_mg' in df.columns:
+        total_co2 = df['co2_step_mg'].sum()
+        print(f"\n--- CO₂ (30 gCO₂eq/kWh) ---")
+        print(f"  Total:   {total_co2:.3f} mg ({total_co2/1000:.6f} g)")
 
-    # ---- Warmup Overhead ----
-    print(f"\n--- Warmup Overhead (Step 0 vs Steady State) ---")
-    warmup = df.iloc[0]
-    for phase, col in [
-        ('Forward', 'forward_time_ms'),
-        ('Backward', 'backward_time_ms'),
-        ('Optimizer', 'optimizer_time_ms'),
-        ('Total step', 'step_time_ms'),
-    ]:
-        w_val = warmup[col]
-        s_val = steady[col].mean()
-        ratio = w_val / s_val if s_val > 0 else 0
-        print(f"  {phase:12s}: {w_val:7.2f} ms vs {s_val:.2f} ms "
-              f"({ratio:.2f}x)")
+    # Memory
+    print(f"\n--- GPU Memory (steady state) ---")
+    print(f"  Allocated: {ss['gpu_memory_allocated_mb'].mean()/1024:.1f} GB")
+    print(f"  Peak:      {ss['gpu_memory_peak_mb'].mean()/1024:.1f} GB")
+    print(f"  Reserved:  {ss['gpu_memory_reserved_mb'].mean()/1024:.1f} GB")
 
-    if power:
-        print(f"\n  Energy overhead:")
-        for phase, col in [
-            ('Forward', 'energy_forward_j'),
-            ('Backward', 'energy_backward_j'),
-            ('Optimizer', 'energy_optimizer_j'),
-            ('Total step', 'energy_step_j'),
-        ]:
-            w_val = warmup[col] * 1000
-            s_val = steady[col].mean() * 1000
-            ratio = w_val / s_val if s_val > 0 else 0
-            print(f"  {phase:12s}: {w_val:7.2f} mJ vs {s_val:.2f} mJ "
-                  f"({ratio:.2f}x)")
-
-    print("\n" + "=" * 60)
+    print("=" * 65)
 
 
 # ============================================================
-# MAIN
+# Main
 # ============================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Plot hardware monitoring results'
-    )
-    parser.add_argument(
-        '--csv', type=str, required=True,
-        help='Path to hardware_stats CSV',
-    )
-    parser.add_argument(
-        '--output', type=str, default='./plots',
-        help='Output directory for plots',
-    )
-    parser.add_argument(
-        '--run_id', type=str, default='t5_hardware',
-        help='Run identifier for filenames',
-    )
-
+        description='Plot hardware monitoring results (v2)')
+    parser.add_argument('--csv', type=str, required=True,
+                        help='Path to hardware_stats CSV')
+    parser.add_argument('--output', type=str, default='./plots',
+                        help='Output directory for plots')
+    parser.add_argument('--run_id', type=str, default='t5_v2',
+                        help='Run identifier for filenames')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
-
-    print(f"Loading data from: {args.csv}")
+    print(f"\nLoading: {args.csv}")
     df = load_data(args.csv)
-    print(f"Loaded {len(df)} steps")
 
-    power = has_power_data(df)
-    if power:
-        print("Power/energy columns detected — generating full plot suite")
-    else:
-        print("No power/energy columns — generating timing + hardware plots only")
+    v2 = has_v2_columns(df)
+    has_power = 'energy_step_j' in df.columns
+    print(f"  Format: {'v2' if v2 else 'v1'}, "
+          f"Power data: {'yes' if has_power else 'no'}")
+    print(f"  Output: {args.output}\n")
 
-    print(f"\nGenerating plots in: {args.output}\n")
+    print("Generating plots:")
 
-    # ---- Always generate these ----
-    print("Timing plots:")
+    print("  [1/9] Phase Durations")
     plot_phase_durations(df, args.output, args.run_id)
-    plot_phase_breakdown(df, args.output, args.run_id)
-    plot_warmup_comparison(df, args.output, args.run_id)
 
-    print("\nHardware plots:")
+    if has_power:
+        print("  [2/9] Time vs Energy")
+        plot_time_vs_energy(df, args.output, args.run_id)
+
+        print("  [3/9] GPU Power")
+        plot_gpu_power(df, args.output, args.run_id)
+
+        print("  [4/9] Warmup Analysis")
+        plot_warmup_analysis(df, args.output, args.run_id)
+
+        print("  [5/9] Energy per Step")
+        plot_energy_per_step(df, args.output, args.run_id)
+
+        print("  [6/9] CO₂ Emissions")
+        plot_co2_emissions(df, args.output, args.run_id)
+
+    print("  [7/9] GPU Memory")
     plot_gpu_memory(df, args.output, args.run_id)
+
+    print("  [8/9] GPU Utilization")
     plot_gpu_utilization(df, args.output, args.run_id)
 
-    # ---- Generate if power data exists ----
-    if power:
-        print("\nEnergy plots:")
-        plot_gpu_power(df, args.output, args.run_id)
-        plot_energy_breakdown(df, args.output, args.run_id)
-        plot_energy_per_step(df, args.output, args.run_id)
-        plot_temperature(df, args.output, args.run_id)
-        plot_time_vs_energy_comparison(df, args.output, args.run_id)
-        plot_warmup_energy_comparison(df, args.output, args.run_id)
+    if has_power:
+        print("  [9/9] GPU Temperature")
+        plot_gpu_temperature(df, args.output, args.run_id)
 
-    # ---- Text summary ----
     print_summary(df)
 
-    print(f"\n{'=' * 40}")
-    print(f"All plots generated in: {args.output}")
-    total_plots = 5 + (6 if power else 0)
-    print(f"Total plots: {total_plots}")
-    print(f"{'=' * 40}")
+    n_plots = 4 + (5 if has_power else 0)
+    print(f"\nDone — {n_plots} plots saved to {args.output}/")
 
 
 if __name__ == '__main__':
