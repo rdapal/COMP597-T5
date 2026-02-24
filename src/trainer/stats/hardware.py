@@ -477,8 +477,7 @@ class HardwareTrainerStats(base.TrainerStats):
             data_transfer_time_ms=self._dt_time_ns / 1e6,
             forward_time_ms=self._fwd_time_ns / 1e6,
             backward_time_ms=self._bwd_time_ns / 1e6,
-            optimizer_time_ms=self._opt_time_ns
-                        optimizer_time_ms=self._opt_time_ns / 1e6,
+            optimizer_time_ms=self._opt_time_ns / 1e6,
             overhead_time_ms=overhead_ns / 1e6,
             # memory
             gpu_memory_allocated_mb=gpu_mem[0] / (1024 * 1024),
