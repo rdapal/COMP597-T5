@@ -145,7 +145,7 @@ class SimpleTrainer(base.Trainer):
             # Check elapsed time before starting the next step
             elapsed_time = time.perf_counter() - start_time_sec
             if elapsed_time >= time_limit_sec:
-                print(f"\n[INFO] Reached 5-minute execution limit at step {i} ({elapsed_time:.1f}s). Terminating loop gracefully.")
+                print(f"\n[TERMINATING] Reached 5-minute execution limit at step {i} ({elapsed_time:.1f}s).")
                 break
 
             self.stats.start_step()

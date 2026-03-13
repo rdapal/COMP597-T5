@@ -242,6 +242,11 @@ class HardwareTrainerStats(base.TrainerStats):
                 pass
         return 0.0
 
+    def _sync_cuda(self) -> None:
+        """Ensure all pending GPU kernels have completed"""
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
     def _poll_hardware(self):
         """Polls NVML and PyTorch memory - executed only every >= 500ms"""
         if self.device.type == "cuda":
@@ -377,6 +382,14 @@ class HardwareTrainerStats(base.TrainerStats):
     def stop_optimizer_step(self) -> None:
         self._sync_cuda()
         self._opt_time_ns = self._time_ns() - self._opt_start_ns
+    
+    def start_save_checkpoint(self) -> None:
+
+        pass
+
+    def stop_save_checkpoint(self) -> None:
+
+        pass 
 
     # ==========================================================
     # Loss / Logging
