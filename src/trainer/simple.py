@@ -7,8 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import time
-import tdqm.auto
-
+import tqdm.auto
 
 class SimpleTrainer(base.Trainer):
     """Trainer for a simple iteration.

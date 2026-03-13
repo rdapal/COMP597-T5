@@ -342,39 +342,41 @@ class HardwareTrainerStats(base.TrainerStats):
         self.current_step += 1
 
     # ==========================================================
-    # TrainerStats interface — Phase Hooks (Stripped of NVML overhead)
-    # NOTE: torch.cuda.synchronize() is now handled by simple.py based on flags
+    # TrainerStats interface — Phase Hooks
+    # NOTE: torch.cuda.synchronize() is now handled by simple.py based on phase flags
     # ==========================================================
 
     def start_data_transfer(self) -> None:
+        self._sync_cuda()
         self._dt_start_ns = self._time_ns()
 
     def stop_data_transfer(self) -> None:
+        self._sync_cuda()
         self._dt_time_ns = self._time_ns() - self._dt_start_ns
 
     def start_forward(self) -> None:
+        self._sync_cuda()
         self._fwd_start_ns = self._time_ns()
 
     def stop_forward(self) -> None:
+        self._sync_cuda()
         self._fwd_time_ns = self._time_ns() - self._fwd_start_ns
 
     def start_backward(self) -> None:
+        self._sync_cuda()
         self._bwd_start_ns = self._time_ns()
 
     def stop_backward(self) -> None:
+        self._sync_cuda()
         self._bwd_time_ns = self._time_ns() - self._bwd_start_ns
 
     def start_optimizer_step(self) -> None:
+        self._sync_cuda()
         self._opt_start_ns = self._time_ns()
 
     def stop_optimizer_step(self) -> None:
+        self._sync_cuda()
         self._opt_time_ns = self._time_ns() - self._opt_start_ns
-
-    def start_save_checkpoint(self) -> None:
-        pass
-
-    def stop_save_checkpoint(self) -> None:
-        pass
 
     # ==========================================================
     # Loss / Logging
@@ -412,4 +414,102 @@ class HardwareTrainerStats(base.TrainerStats):
         print("\n" + "=" * 65)
         print("HARDWARE + ENERGY SUMMARY  (v3)")
         print("=" * 65)
-        print(f"Total steps: {len(all_recs)} "
+        print(f"Total steps: {len(all_recs)} ({WARMUP_STEPS} warmup, {len(steady)} steady-state)")
+
+        # ---- Timing ----
+        print(f"\n--- Timing (steady state, ms) ---")
+        for label, attr in [
+            ("Data xfer", "data_transfer_time_ms"),
+            ("Forward",   "forward_time_ms"),
+            ("Backward",  "backward_time_ms"),
+            ("Optimizer", "optimizer_time_ms"),
+            ("Total step","step_time_ms"),
+        ]:
+            vals = [getattr(r, attr) for r in steady]
+            avg = sum(vals) / len(vals)
+            std = (sum((v - avg) ** 2 for v in vals) / len(vals)) ** 0.5
+            print(f"  {label:12s}: {avg:8.2f} ± {std:.2f} ms")
+
+        # ---- Energy ----
+        print(f"\n--- Energy ---")
+        total_e = sum(r.energy_step_j for r in all_recs)
+        avg_e_mj = sum(r.energy_step_j for r in steady) / len(steady) * 1000
+        print(f"  Total training:    {total_e:.1f} J ({total_e / 3600:.4f} Wh)")
+        print(f"  Avg steady step:   {avg_e_mj:.1f} mJ")
+
+        print("=" * 65 + "\n")
+
+    # ==========================================================
+    # Persistence
+    # ==========================================================
+
+    def _save_results(self) -> None:
+        """Write CSV + JSON metadata"""
+        if not self.step_records:
+            logger.warning("No step records to save")
+            return
+
+        # ---- CSV ----
+        csv_path = os.path.join(
+            self.output_dir, f"hardware_stats_{self.run_id}.csv"
+        )
+        field_names = [f.name for f in fields(StepRecord)]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=field_names)
+            writer.writeheader()
+            for rec in self.step_records:
+                writer.writerow(asdict(rec))
+        logger.info(f"CSV saved: {csv_path} ({len(self.step_records)} rows)")
+
+        # ---- JSON metadata ----
+        steady = self.step_records[WARMUP_STEPS:]
+        total_energy = sum(r.energy_step_j for r in self.step_records)
+        total_co2 = sum(r.co2_step_mg for r in self.step_records)
+
+        metadata = {
+            "version": 3,
+            "run_id": self.run_id,
+            "timestamp": datetime.now().isoformat(),
+            "gpu": {
+                "name": self.gpu_name,
+                "power_limit_w": self.gpu_power_limit_w,
+            },
+            "config": {
+                "num_steps": len(self.step_records),
+                "warmup_steps": WARMUP_STEPS,
+                "steady_state_steps": len(steady),
+                "carbon_intensity_gco2eq_per_kwh": self.carbon_intensity,
+            },
+            "totals": {
+                "energy_j": round(total_energy, 3),
+                "energy_wh": round(total_energy / 3600, 6),
+                "co2_mg": round(total_co2, 4),
+                "co2_g": round(total_co2 / 1000, 7),
+            },
+            "steady_state_averages": {
+                "step_time_ms": round(
+                    sum(r.step_time_ms for r in steady) / len(steady), 2
+                ) if steady else 0,
+                "energy_step_mj": round(
+                    sum(r.energy_step_j for r in steady) / len(steady) * 1000, 1
+                ) if steady else 0,
+                "gpu_utilization_pct": round(
+                    sum(r.gpu_utilization for r in steady) / len(steady), 1
+                ) if steady else 0,
+                "gpu_temperature_c": round(
+                    sum(r.gpu_temperature_c for r in steady) / len(steady), 1
+                ) if steady else 0,
+            },
+            "known_limitations": [
+                "Hardware metrics polled every >= 500ms to reduce overhead",
+                "Energy inferred from NVML total counter and amortized across steps in window",
+                "Phase synchronization controlled by SimpleTrainer to isolate overhead",
+            ],
+        }
+
+        json_path = os.path.join(
+            self.output_dir, f"metadata_{self.run_id}.json"
+        )
+        with open(json_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Metadata saved: {json_path}")
