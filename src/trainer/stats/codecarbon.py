@@ -231,6 +231,12 @@ class CodeCarbonStats(base.TrainerStats):
         torch.cuda.synchronize(self.device)
         self.training_step_tracker.stop_task(task_name = f"Step #{self.iteration}")
 
+    def start_data_transfer(self) -> None:
+        pass
+
+    def stop_data_transfer(self) -> None:
+        pass
+
     def start_forward(self) -> None: 
         torch.cuda.synchronize(self.device)
         self.training_substep_tracker.start_task(task_name = f"Forward pass #{self.iteration}")

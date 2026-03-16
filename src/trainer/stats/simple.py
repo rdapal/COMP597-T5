@@ -74,6 +74,12 @@ class SimpleTrainerStats(base.TrainerStats):
     def stop_step(self) -> None:
         torch.cuda.synchronize(self.device)
         self.step_stats.stop()
+    
+    def start_data_transfer(self) -> None:
+        pass
+
+    def stop_data_transfer(self) -> None:
+        pass
 
     def start_data_transfer(self) -> None:
         pass

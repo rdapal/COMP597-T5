@@ -36,6 +36,12 @@ class NOOPTrainerStats(base.TrainerStats):
     def stop_data_transfer(self) -> None:
         pass
 
+    def start_data_transfer(self) -> None:
+        pass
+
+    def stop_data_transfer(self) -> None:
+        pass
+
     def start_optimizer_step(self) -> None:
         pass
 

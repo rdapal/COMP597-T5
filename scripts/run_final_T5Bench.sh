@@ -35,22 +35,34 @@
 # ==============================================================================
 
 SCRIPTS_DIR=$(readlink -f -n $(dirname $0))
+PROJECT_ROOT=$(readlink -f -n ${SCRIPTS_DIR}/..)
 
 # ------------------------------------------------------------------------------
 # FOLDER STRUCTURE SETUP
 # ------------------------------------------------------------------------------
 DATE_FORMAT=$(date +"%Y%m%d_%H%M%S")
-BASE_DIR="hardware_stats/experiments_${DATE_FORMAT}"
-RAW_DIR="${BASE_DIR}/raw_data"
-PLOT_DIR="${BASE_DIR}/plots"
 
-# Ensure output directories exist locally
-mkdir -p "${RAW_DIR}"
-mkdir -p "${PLOT_DIR}"
+# Remote SLURM Shared Storage
+REMOTE_DIR="/home/slurm/comp597/students/rdapal/experiments_${DATE_FORMAT}"
+
+# Local Storage for final plots, logs, and CSV backups
+LOCAL_BASE_DIR="${PROJECT_ROOT}/hardware_stats/experiments_${DATE_FORMAT}"
+LOCAL_RAW_DIR="${LOCAL_BASE_DIR}/raw_data"
+LOCAL_PLOT_DIR="${LOCAL_BASE_DIR}/plots"
+LOCAL_LOG_DIR="${LOCAL_BASE_DIR}/logs"
+
+# Ensure local directories exist
+mkdir -p "${LOCAL_RAW_DIR}"
+mkdir -p "${LOCAL_PLOT_DIR}"
+mkdir -p "${LOCAL_LOG_DIR}"
+
+# Ensure remote directory exists on SLURM partition
+${SCRIPTS_DIR}/bash_srun.sh "mkdir -p ${REMOTE_DIR}"
 
 # ------------------------------------------------------------------------------
 # EXPERIMENT PARAMETERS
 # ------------------------------------------------------------------------------
+export COMP597_SLURM_TIME_LIMIT="10:00" # 10 minute allocation to pad time
 BATCH_SIZES=(16 8 4)
 REPETITIONS=(1 2 3)
 
@@ -70,72 +82,80 @@ for bs in "${BATCH_SIZES[@]}"; do
         echo "  -> Run 1/6: End-to-End Time (NOOP)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats noop > "${OUT_DIR}/e2e_time_bs${bs}_rep${rep}.log"
+            --trainer_stats noop > "${LOCAL_LOG_DIR}/e2e_time_bs${bs}_rep${rep}.log"
 
         # 2. End-to-End Energy (CodeCarbon)
         echo "  -> Run 2/6: End-to-End Energy (CodeCarbon)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
             --trainer_stats codecarbon \
-            --trainer_stats_configs.codecarbon.output_dir "${OUT_DIR}/codecarbon_bs${bs}_rep${rep}"
+            --trainer_stats_configs.codecarbon.output_dir "${REMOTE_DIR}/codecarbon_bs${bs}_rep${rep}"
 
         # 3. Fine-Grained Timelines (Hardware stats, no phase syncs)
-        # By passing "timeline", simple.py bypasses all phase syncs, leaving only 500ms background polling.
         echo "  -> Run 3/6: Fine-Grained Timelines (500ms Hardware Polling)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
             --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${OUT_DIR}" \
+            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
             --trainer_configs.simple.profile_phase "timeline" \
-            --trainer_stats_configs.hardware.run_id "timeline_bs${bs}_rep${rep}"
+            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_timeline"
 
         # 4. Phase Profiling: FORWARD
         echo "  -> Run 4/6: Phase Profiling (Forward)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
             --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${OUT_DIR}" \
+            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
             --trainer_configs.simple.profile_phase "forward" \
-            --trainer_stats_configs.hardware.run_id "fwd_bs${bs}_rep${rep}"
+            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_fwd"
 
         # 5. Phase Profiling: BACKWARD
         echo "  -> Run 5/6: Phase Profiling (Backward)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
             --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${OUT_DIR}" \
+            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
             --trainer_configs.simple.profile_phase "backward" \
-            --trainer_stats_configs.hardware.run_id "bwd_bs${bs}_rep${rep}"
+            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_bwd"
 
         # 6. Phase Profiling: OPTIMIZER
         echo "  -> Run 6/6: Phase Profiling (Optimizer)"
         ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
             --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
             --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${OUT_DIR}" \
+            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
             --trainer_configs.simple.profile_phase "optimizer" \
-            --trainer_stats_configs.hardware.run_id "opt_bs${bs}_rep${rep}"
+            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_opt"
 
     done
 done
 
 echo "========================================================="
+echo " FETCHING DATA FROM SLURM STORAGE"
+echo "========================================================="
+# Pull the generated CSVs back into the local raw_data directory
+${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_DIR}/*.csv ${LOCAL_RAW_DIR}/'"
+# Pull the generated JSON metadata files as well
+${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_DIR}/*.json ${LOCAL_RAW_DIR}/'"
+
+echo "========================================================="
 echo " GENERATING PLOTS"
 echo "========================================================="
-# Loop through all CSV files generated in the raw_data directory
-for csv_file in ${RAW_DIR}/*.csv; do
-    if [ -f "$csv_file" ]; then
-        # Extract filename to use as the plot identifier
+# Safely attempt to plot the fetched data
+if [ "$(ls -A ${LOCAL_RAW_DIR}/*.csv 2>/dev/null)" ]; then
+    for csv_file in ${LOCAL_RAW_DIR}/*.csv; do
         filename=$(basename -- "$csv_file")
         run_id="${filename%.*}"
         run_id="${run_id#hardware_stats_}"
         
         echo "  -> Plotting ${run_id}..."
-        python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${PLOT_DIR}" --run_id "${run_id}"
-    fi
-done
+        python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${LOCAL_PLOT_DIR}" --run_id "${run_id}"
+    done
+else
+    echo "[WARNING] No CSV files were found in ${LOCAL_RAW_DIR} to plot."
+fi
 
 echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 echo " --> ALL EXPERIMENTS COMPLETE <---"
-echo "Results stored in: ${OUT_DIR}"
+echo "Results stored locally in: ${LOCAL_BASE_DIR}"
 echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
