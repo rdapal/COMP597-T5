@@ -187,6 +187,7 @@ def simple_trainer(
         lr_scheduler=scheduler,
         device=model.device,
         stats=stats
+        conf=conf
     ), None
 
 

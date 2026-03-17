@@ -32,10 +32,38 @@
 #   - Time Limit: Hard-coded 5:00 minutes (300s) inside Python loop. SLURM config
 #     allocation is set at 10:00 to buffer our run time
 #   - Outputs: Logs (.log), CodeCarbon files, and V3 Hardware Stats (.csv & .json)
+#
+# USAGE:
+#   Run full matrix:  ./scripts/run_final_T5Bench.sh
+#   Run specific BS:  ./scripts/run_final_T5Bench.sh --batch_size 8
+#   Run specific Rep: ./scripts/run_final_T5Bench.sh --rep 2
+#   Run specific Run: ./scripts/run_final_T5Bench.sh --run_type forward
+#   Combine flags:    ./scripts/run_final_T5Bench.sh -b 4 -r 1 -t timeline
 # ==============================================================================
 
-SCRIPTS_DIR=$(readlink -f -n $(dirname $0))
-PROJECT_ROOT=$(readlink -f -n ${SCRIPTS_DIR}/..)
+SCRIPTS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+PROJECT_ROOT="$( cd "${SCRIPTS_DIR}/.." >/dev/null 2>&1 && pwd )"
+
+# ------------------------------------------------------------------------------
+# ARGUMENT PARSING
+# ------------------------------------------------------------------------------
+TARGET_BS=""
+TARGET_REP=""
+TARGET_RUN=""
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -b|--batch_size) TARGET_BS="$2"; shift ;;
+        -r|--rep) TARGET_REP="$2"; shift ;;
+        -t|--run_type) TARGET_RUN="$2"; shift ;;
+        *) echo "[ERROR] Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# Set arrays based on flags, or default to the full matrix
+if [ -n "$TARGET_BS" ]; then BATCH_SIZES=($TARGET_BS); else BATCH_SIZES=(8 4 2); fi
+if [ -n "$TARGET_REP" ]; then REPETITIONS=($TARGET_REP); else REPETITIONS=(1 2 3); fi
 
 # ------------------------------------------------------------------------------
 # FOLDER STRUCTURE SETUP
@@ -44,31 +72,26 @@ DATE_FORMAT=$(date +"%Y%m%d_%H%M%S")
 
 # Remote SLURM Shared Storage
 REMOTE_DIR="/home/slurm/comp597/students/rdapal/experiments_${DATE_FORMAT}"
+REMOTE_INDIV_DIR="${REMOTE_DIR}/individual_experiments"
 
 # Local Storage for final plots, logs, and CSV backups
 LOCAL_BASE_DIR="${PROJECT_ROOT}/hardware_stats/experiments_${DATE_FORMAT}"
-LOCAL_RAW_DIR="${LOCAL_BASE_DIR}/raw_data"
+LOCAL_INDIV_DIR="${LOCAL_BASE_DIR}/individual_experiments"
 LOCAL_PLOT_DIR="${LOCAL_BASE_DIR}/plots"
 LOCAL_LOG_DIR="${LOCAL_BASE_DIR}/logs"
 
-# Ensure local directories exist
-mkdir -p "${LOCAL_RAW_DIR}"
-mkdir -p "${LOCAL_PLOT_DIR}"
-mkdir -p "${LOCAL_LOG_DIR}"
+# Ensure directories exist
+mkdir -p "${LOCAL_INDIV_DIR}" "${LOCAL_PLOT_DIR}" "${LOCAL_LOG_DIR}"
+${SCRIPTS_DIR}/bash_srun.sh "mkdir -p ${REMOTE_INDIV_DIR}"
 
-# Ensure remote directory exists on SLURM partition
-${SCRIPTS_DIR}/bash_srun.sh "mkdir -p ${REMOTE_DIR}"
-
-# ------------------------------------------------------------------------------
-# EXPERIMENT PARAMETERS
-# ------------------------------------------------------------------------------
 export COMP597_SLURM_TIME_LIMIT="10:00" # 10 minute allocation to pad time
-BATCH_SIZES=(16 8 4)
-REPETITIONS=(1 2 3)
 
 echo "========================================================="
 echo "Starting T5 Experiment Suite"
-echo "Output Directory: ${BASE_DIR}"
+echo "   Target Batch Sizes : ${BATCH_SIZES[*]}"
+echo "   Target Repetitions : ${REPETITIONS[*]}"
+if [ -n "$TARGET_RUN" ]; then echo "   Target Run Type    : ${TARGET_RUN}"; fi
+echo "   Remote Storage     : ${REMOTE_INDIV_DIR}"
 echo "========================================================="
 
 for bs in "${BATCH_SIZES[@]}"; do
@@ -79,53 +102,65 @@ for bs in "${BATCH_SIZES[@]}"; do
         echo "========================================================="
 
         # 1. End-to-End Time (NOOP)
-        echo "  -> Run 1/6: End-to-End Time (NOOP)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats noop > "${LOCAL_LOG_DIR}/e2e_time_bs${bs}_rep${rep}.log"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "noop" ]]; then
+            echo "  -> Run: End-to-End Time (NOOP)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats noop > "${LOCAL_LOG_DIR}/e2e_time_bs${bs}_rep${rep}.log"
+        fi
 
         # 2. End-to-End Energy (CodeCarbon)
-        echo "  -> Run 2/6: End-to-End Energy (CodeCarbon)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats codecarbon \
-            --trainer_stats_configs.codecarbon.output_dir "${REMOTE_DIR}/codecarbon_bs${bs}_rep${rep}"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "codecarbon" ]]; then
+            echo "  -> Run: End-to-End Energy (CodeCarbon)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats codecarbon \
+                --trainer_stats_configs.codecarbon.output_dir "${REMOTE_INDIV_DIR}/codecarbon_bs${bs}_rep${rep}"
+        fi
 
         # 3. Fine-Grained Timelines (Hardware stats, no phase syncs)
-        echo "  -> Run 3/6: Fine-Grained Timelines (500ms Hardware Polling)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
-            --trainer_configs.simple.profile_phase "timeline" \
-            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_timeline"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "timeline" ]]; then
+            echo "  -> Run: Fine-Grained Timelines (500ms Hardware Polling)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats hardware \
+                --trainer_stats_configs.hardware.output_dir "${REMOTE_INDIV_DIR}" \
+                --trainer_configs.simple.profile_phase "timeline" \
+                --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_timeline"
+        fi
 
         # 4. Phase Profiling: FORWARD
-        echo "  -> Run 4/6: Phase Profiling (Forward)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
-            --trainer_configs.simple.profile_phase "forward" \
-            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_fwd"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "forward" ]]; then
+            echo "  -> Run: Phase Profiling (Forward)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats hardware \
+                --trainer_stats_configs.hardware.output_dir "${REMOTE_INDIV_DIR}" \
+                --trainer_configs.simple.profile_phase "forward" \
+                --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_fwd"
+        fi
 
         # 5. Phase Profiling: BACKWARD
-        echo "  -> Run 5/6: Phase Profiling (Backward)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
-            --trainer_configs.simple.profile_phase "backward" \
-            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_bwd"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "backward" ]]; then
+            echo "  -> Run: Phase Profiling (Backward)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats hardware \
+                --trainer_stats_configs.hardware.output_dir "${REMOTE_INDIV_DIR}" \
+                --trainer_configs.simple.profile_phase "backward" \
+                --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_bwd"
+        fi
 
         # 6. Phase Profiling: OPTIMIZER
-        echo "  -> Run 6/6: Phase Profiling (Optimizer)"
-        ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
-            --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
-            --trainer_stats hardware \
-            --trainer_stats_configs.hardware.output_dir "${REMOTE_DIR}" \
-            --trainer_configs.simple.profile_phase "optimizer" \
-            --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_opt"
+        if [[ -z "$TARGET_RUN" || "$TARGET_RUN" == "optimizer" ]]; then
+            echo "  -> Run: Phase Profiling (Optimizer)"
+            ${SCRIPTS_DIR}/srun.sh --logging.level INFO --model t5 --trainer simple --data synthetic \
+                --batch_size $bs --learning_rate 1e-6 --data_configs.dataset.split '"train[:50000]"' \
+                --trainer_stats hardware \
+                --trainer_stats_configs.hardware.output_dir "${REMOTE_INDIV_DIR}" \
+                --trainer_configs.simple.profile_phase "optimizer" \
+                --trainer_stats_configs.hardware.run_id "bs${bs}_rep${rep}_opt"
+        fi
 
     done
 done
@@ -134,16 +169,16 @@ echo "========================================================="
 echo " FETCHING DATA FROM SLURM STORAGE"
 echo "========================================================="
 # Pull the generated CSVs back into the local raw_data directory
-${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_DIR}/*.csv ${LOCAL_RAW_DIR}/'"
+${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_INDIV_DIR}/*.csv ${LOCAL_INDIV_DIR}/ 2>/dev/null || true'"
 # Pull the generated JSON metadata files as well
-${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_DIR}/*.json ${LOCAL_RAW_DIR}/'"
+${SCRIPTS_DIR}/bash_srun.sh "bash -c 'cp ${REMOTE_INDIV_DIR}/*.json ${LOCAL_INDIV_DIR}/ 2>/dev/null || true'"
 
 echo "========================================================="
 echo " GENERATING PLOTS"
 echo "========================================================="
 # Safely attempt to plot the fetched data
-if [ "$(ls -A ${LOCAL_RAW_DIR}/*.csv 2>/dev/null)" ]; then
-    for csv_file in ${LOCAL_RAW_DIR}/*.csv; do
+if [ "$(ls -A ${LOCAL_INDIV_DIR}/*.csv 2>/dev/null)" ]; then
+    for csv_file in ${LOCAL_INDIV_DIR}/*.csv; do
         filename=$(basename -- "$csv_file")
         run_id="${filename%.*}"
         run_id="${run_id#hardware_stats_}"
@@ -152,7 +187,7 @@ if [ "$(ls -A ${LOCAL_RAW_DIR}/*.csv 2>/dev/null)" ]; then
         python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${LOCAL_PLOT_DIR}" --run_id "${run_id}"
     done
 else
-    echo "[WARNING] No CSV files were found in ${LOCAL_RAW_DIR} to plot."
+    echo "[WARNING] No CSV files were found in ${LOCAL_INDIV_DIR} to plot."
 fi
 
 echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
