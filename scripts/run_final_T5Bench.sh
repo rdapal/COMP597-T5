@@ -178,14 +178,10 @@ echo " GENERATING PLOTS"
 echo "========================================================="
 # Safely attempt to plot the fetched data
 if [ "$(ls -A ${LOCAL_INDIV_DIR}/*.csv 2>/dev/null)" ]; then
-    for csv_file in ${LOCAL_INDIV_DIR}/*.csv; do
-        filename=$(basename -- "$csv_file")
-        run_id="${filename%.*}"
-        run_id="${run_id#hardware_stats_}"
-        
-        echo "  -> Plotting ${run_id}..."
-        ${PROJECT_ROOT}/venv/bin/python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${LOCAL_PLOT_DIR}" --run_id "${run_id}"
-    done
+    echo "  -> Aggregating data and generating plots per batch size..."
+    ${PROJECT_ROOT}/venv/bin/python ${SCRIPTS_DIR}/analysis/plot_hardware.py \
+        --input_dir "${LOCAL_INDIV_DIR}" \
+        --output_dir "${LOCAL_PLOT_DIR}"
 else
     echo "[WARNING] No CSV files were found in ${LOCAL_INDIV_DIR} to plot."
 fi
