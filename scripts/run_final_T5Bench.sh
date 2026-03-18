@@ -184,7 +184,7 @@ if [ "$(ls -A ${LOCAL_INDIV_DIR}/*.csv 2>/dev/null)" ]; then
         run_id="${run_id#hardware_stats_}"
         
         echo "  -> Plotting ${run_id}..."
-        python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${LOCAL_PLOT_DIR}" --run_id "${run_id}"
+        ${PROJECT_ROOT}/venv/bin/python ${SCRIPTS_DIR}/analysis/plot_hardware.py --csv "$csv_file" --output "${LOCAL_PLOT_DIR}" --run_id "${run_id}"
     done
 else
     echo "[WARNING] No CSV files were found in ${LOCAL_INDIV_DIR} to plot."
